@@ -1306,17 +1306,115 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   }, [viewData]);
 
   const [eventType, setEventType] = useState("hire"); // "hire" | "departure"
+  const [roiResult, setRoiResult] = useState(null);   // AI ROI analysis
+  const [roiLoading, setRoiLoading] = useState(false);
+  const [lastRoiKey, setLastRoiKey] = useState("");   // tracks which hire was analysed
+
+  // Compute deterministic ROI numbers for the selected hire config
+  const computeRoiNumbers = (roleId, regionId, numCount, startMo) => {
+    const roleObj = STAFF_ROLES.find(r => r.id === roleId);
+    if (!roleObj) return null;
+    const uv = regionUnitValues.get(regionId) || 471;
+    const monthlyCost = getMonthlyCost(roleId) * numCount;
+    const startIdx = months.indexOf(startMo);
+    if (startIdx === -1) return null;
+
+    // Project 18 months forward
+    let cumCost = 0, cumRev = 0, breakEvenMonth = null;
+    const monthly = [];
+    for (let mo = 0; mo < 18; mo++) {
+      const units = roleId === "sales" ? getSalesUnits(mo) : roleId === "trainer" ? getTrainerUnits(mo) : 0;
+      const rev = units * numCount * uv;
+      cumCost += monthlyCost;
+      cumRev  += rev;
+      const net = cumRev - cumCost;
+      if (net >= 0 && breakEvenMonth === null) breakEvenMonth = mo + 1;
+      const calLabel = months[startIdx + mo] || `M${mo+1}`;
+      monthly.push({ mo: mo + 1, label: calLabel, rev, cost: monthlyCost, net: cumRev - cumCost });
+    }
+
+    // FY26 remaining months from startMonth
+    const fy26Months = MONTH_SCHEDULE.filter(m => m.fy === "FY26");
+    const fy26Remaining = fy26Months.filter(m => months.indexOf(m.label) >= startIdx);
+    const fy26Net = fy26Remaining.reduce((s, _, idx) => {
+      const units = roleId === "sales" ? getSalesUnits(idx) : roleId === "trainer" ? getTrainerUnits(idx) : 0;
+      return s + (units * numCount * uv) - monthlyCost;
+    }, 0);
+
+    return {
+      roleLabel: roleObj.label,
+      region: regionId,
+      count: numCount,
+      startMonth: startMo,
+      monthlyCost,
+      uv: Math.round(uv),
+      breakEvenMonth,
+      fy26Net: Math.round(fy26Net),
+      monthly,
+      totalCost18: Math.round(monthlyCost * 18),
+      totalRev18: Math.round(monthly.reduce((s,m)=>s+m.rev,0)),
+    };
+  };
 
   const addEvent = () => {
     if(!startMonth) return;
-    setHiringEvents(prev => [...prev, {
+    const newEvent = {
       id: Math.random().toString(36).slice(2,9),
       roleId: role,
       count: Math.max(1, Number(count)),
       startMonth,
       region,
-      eventType,   // "hire" or "departure"
-    }]);
+      eventType,
+    };
+    setHiringEvents(prev => [...prev, newEvent]);
+
+    // Trigger AI ROI analysis for hires only
+    if (eventType === "hire") {
+      const roiKey = `${role}-${region}-${count}-${startMonth}`;
+      if (roiKey !== lastRoiKey) {
+        setLastRoiKey(roiKey);
+        runRoiAnalysis(role, region, Math.max(1, Number(count)), startMonth);
+      }
+    }
+  };
+
+  const runRoiAnalysis = async (roleId, regionId, numCount, startMo) => {
+    setRoiLoading(true);
+    setRoiResult(null);
+    const numbers = computeRoiNumbers(roleId, regionId, numCount, startMo);
+    if (!numbers) { setRoiLoading(false); return; }
+
+    try {
+      const prompt = `You are a concise financial analyst for ABC Training, an Australian RTO.
+A hiring decision is being evaluated:
+- Role: ${numbers.roleLabel} × ${numbers.count}
+- Region: ${numbers.region}
+- Start month: ${numbers.startMonth}
+- Monthly cost (wages+super+payroll tax): ${fmtAUD(numbers.monthlyCost, false)}
+- Average unit value in ${numbers.region}: $${numbers.uv}
+- Break-even month: ${numbers.breakEvenMonth ? `Month ${numbers.breakEvenMonth}` : "Beyond 18 months"}
+- Net contribution to FY26 (remaining months): ${fmtAUD(numbers.fy26Net, false)}
+- 18-month total cost: ${fmtAUD(numbers.totalCost18, false)}
+- 18-month total revenue: ${fmtAUD(numbers.totalRev18, false)}
+- 18-month net: ${fmtAUD(numbers.totalRev18 - numbers.totalCost18, false)}
+
+${numbers.breakEvenMonth
+  ? `The hire breaks even at month ${numbers.breakEvenMonth} (${numbers.startMonth} + ${numbers.breakEvenMonth - 1} months).`
+  : "This hire does NOT break even within 18 months."}
+
+Write a 3-sentence hiring ROI verdict for a manager. Cover:
+1. The payback period and what it means
+2. The FY26 net contribution (positive or negative)
+3. One key risk or opportunity to watch
+
+Be direct, specific with dollar amounts, and use plain English. No bullet points, just 3 sentences.`;
+
+      const verdict = await callGemini(prompt, "", 512);
+      setRoiResult({ ...numbers, verdict: verdict.trim() });
+    } catch (e) {
+      setRoiResult({ ...numbers, verdict: null });
+    }
+    setRoiLoading(false);
   };
 
   return (
@@ -1393,10 +1491,97 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
               </div>
               <button onClick={addEvent}
                 className={`w-full flex items-center justify-center gap-1.5 text-white py-2 rounded-lg text-sm font-medium transition-colors ${eventType==="departure"?"bg-rose-600 hover:bg-rose-700":"bg-indigo-600 hover:bg-indigo-700"}`}>
-                {eventType==="departure"?<><Trash2 size={14}/>Add Departure</>:<><Plus size={15}/>Add Hire</>}
+                {eventType==="departure"?<><Trash2 size={14}/>Add Departure</>:<><Plus size={15}/>Add Hire + AI ROI</>}
               </button>
             </div>
           </div>
+
+          {/* ── AI Hiring ROI Panel ──────────────────────────────────────── */}
+          {(roiLoading || roiResult) && (
+            <div className={`rounded-xl border overflow-hidden shadow-sm transition-all ${roiResult && !roiLoading ? "bg-white border-slate-100" : "bg-white border-slate-100"}`}>
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-[9px] font-black shrink-0">AI</div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-800">Hiring ROI Analysis</p>
+                    <p className="text-[10px] text-slate-400">Gemini · instant payback calculation</p>
+                  </div>
+                </div>
+                <button onClick={() => setRoiResult(null)} className="text-slate-300 hover:text-slate-500"><X size={13}/></button>
+              </div>
+
+              {roiLoading && (
+                <div className="px-4 py-6 text-center text-slate-400">
+                  <Loader2 size={22} className="mx-auto mb-2 animate-spin text-violet-400"/>
+                  <p className="text-xs">Calculating ROI and payback period…</p>
+                </div>
+              )}
+
+              {roiResult && !roiLoading && (
+                <div className="p-4 space-y-3">
+                  {/* Key metrics row */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className={`rounded-lg p-2.5 text-center ${roiResult.breakEvenMonth ? "bg-emerald-50" : "bg-rose-50"}`}>
+                      <p className="text-[9px] text-slate-500 font-medium">Break-even</p>
+                      <p className={`text-sm font-black ${roiResult.breakEvenMonth ? "text-emerald-700" : "text-rose-600"}`}>
+                        {roiResult.breakEvenMonth ? `Month ${roiResult.breakEvenMonth}` : ">18 mo"}
+                      </p>
+                    </div>
+                    <div className={`rounded-lg p-2.5 text-center ${roiResult.fy26Net >= 0 ? "bg-emerald-50" : "bg-amber-50"}`}>
+                      <p className="text-[9px] text-slate-500 font-medium">FY26 Net</p>
+                      <p className={`text-sm font-black ${roiResult.fy26Net >= 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                        {roiResult.fy26Net >= 0 ? "+" : ""}{fmtAUD(roiResult.fy26Net, false)}
+                      </p>
+                    </div>
+                    <div className="bg-indigo-50 rounded-lg p-2.5 text-center">
+                      <p className="text-[9px] text-slate-500 font-medium">18-mo Net</p>
+                      <p className={`text-sm font-black ${roiResult.totalRev18 - roiResult.totalCost18 >= 0 ? "text-indigo-700" : "text-rose-600"}`}>
+                        {roiResult.totalRev18 - roiResult.totalCost18 >= 0 ? "+" : ""}{fmtAUD(roiResult.totalRev18 - roiResult.totalCost18, false)}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Monthly cost vs revenue */}
+                  <div className="flex justify-between text-[10px] text-slate-500">
+                    <span>Monthly cost: <span className="font-bold text-rose-600">{fmtAUD(roiResult.monthlyCost, false)}</span></span>
+                    <span>Unit value: <span className="font-bold text-slate-700">${roiResult.uv}/unit</span></span>
+                  </div>
+
+                  {/* Mini sparkline — cumulative net over 18 months */}
+                  <div className="h-20">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={roiResult.monthly} margin={{top:4,right:4,left:4,bottom:0}}>
+                        <CartesianGrid strokeDasharray="2 2" vertical={false} stroke="#f1f5f9"/>
+                        <XAxis dataKey="mo" fontSize={8} tickLine={false} axisLine={false} tickFormatter={v=>`M${v}`} interval={2}/>
+                        <YAxis hide/>
+                        <Tooltip formatter={(v,n)=>[fmtAUD(v,false),n]} contentStyle={{fontSize:"10px",borderRadius:"6px",border:"none",boxShadow:"0 2px 8px rgb(0 0 0/0.1)"}}/>
+                        <ReferenceLine y={0} stroke="#e11d48" strokeDasharray="3 2" strokeWidth={1}/>
+                        <Bar dataKey="rev" fill="#10b981" name="Revenue" opacity={0.6} barSize={6}/>
+                        <Line dataKey="net" stroke="#6366f1" strokeWidth={2} dot={false} name="Cumulative Net"/>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* AI verdict */}
+                  {roiResult.verdict && (
+                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                      <p className="text-[10px] font-bold text-violet-600 mb-1.5 flex items-center gap-1">
+                        <span className="w-4 h-4 rounded bg-violet-100 flex items-center justify-center text-[8px] font-black text-violet-700">AI</span>
+                        Gemini Verdict
+                      </p>
+                      <p className="text-[11px] text-slate-600 leading-relaxed">{roiResult.verdict}</p>
+                    </div>
+                  )}
+
+                  <button onClick={() => runRoiAnalysis(roiResult.roleLabel ? STAFF_ROLES.find(r=>r.label===roiResult.roleLabel)?.id || role : role, roiResult.region, roiResult.count, roiResult.startMonth)}
+                    className="w-full text-[10px] text-slate-400 hover:text-violet-600 flex items-center justify-center gap-1 py-1 transition-colors">
+                    <RefreshCw size={10}/>Regenerate analysis
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
 
           {/* Ramp reference card */}
           {role === "trainer" && (
@@ -3171,8 +3356,7 @@ function AuditLogView() {
 
 
 // ─── AI FEATURE CONSTANTS ─────────────────────────────────────────────────────
-const GEMINI_API_KEY2 = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyCNpcv61iLKvVLrmilNLiyHTfwgtUl-8cI";
-const GEMINI_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY2}`;
+const GEMINI_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
 
 async function callGemini(prompt, systemPrompt = "", maxTokens = 4096) {
   const body = {
@@ -3826,7 +4010,7 @@ function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan }) {
 }
 
 // ─── GEMINI AI ASSISTANT ───────────────────────────────────────────────────────
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "AIzaSyCNpcv61iLKvVLrmilNLiyHTfwgtUl-8cI";
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, currentUser }) {
