@@ -3356,7 +3356,12 @@ function AuditLogView() {
 
 
 // ─── AI FEATURE CONSTANTS ─────────────────────────────────────────────────────
-const GEMINI_BASE = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
+// Route through /api/gemini proxy when running on Vercel (any non-localhost domain)
+// Falls back to direct call on localhost/StackBlitz dev environments
+const IS_PROD = typeof window !== "undefined" && !window.location.hostname.includes("localhost") && !window.location.hostname.includes("stackblitz") && !window.location.hostname.includes("webcontainer");
+const GEMINI_BASE = IS_PROD
+  ? "/api/gemini"
+  : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
 
 async function callGemini(prompt, systemPrompt = "", maxTokens = 4096) {
   const body = {
@@ -4010,8 +4015,10 @@ function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan }) {
 }
 
 // ─── GEMINI AI ASSISTANT ───────────────────────────────────────────────────────
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+// GeminiAssistant reuses the same IS_PROD + proxy logic defined above
+const GEMINI_URL = IS_PROD
+  ? "/api/gemini"
+  : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
 
 function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, currentUser }) {
   const [open, setOpen] = useState(false);
@@ -4492,20 +4499,34 @@ export default function App() {
     async function loadData() {
       try {
         const adjData = await sbGet("unit_adjustments");
-        if (adjData && Array.isArray(adjData)) {
+        if (adjData && Array.isArray(adjData) && adjData.length > 0) {
           const adj = {};
           adjData.forEach(row => { if(row.key && row.value!==null) adj[row.key] = row.value; });
           setUnitAdjustments(adj);
+          console.log(`✓ Loaded ${adjData.length} unit adjustments from Supabase`);
+        } else {
+          // Fallback to localStorage if Supabase table empty or missing
+          const saved = localStorage.getItem("unit_model_adjustments");
+          if (saved) { setUnitAdjustments(JSON.parse(saved)); console.log("✓ Unit adjustments loaded from localStorage fallback"); }
         }
+
         const hireData = await sbGet("hiring_plan");
-        if (hireData && Array.isArray(hireData)) {
+        if (hireData && Array.isArray(hireData) && hireData.length > 0) {
           setHiringEvents(hireData.map(r => ({id:r.id||Math.random().toString(36).slice(2), roleId:r.role_id, count:r.count, startMonth:r.start_month, region:r.region, filled:!!r.filled, eventType:r.event_type||"hire"})));
+        } else {
+          const savedHires = localStorage.getItem("staff_hiring_plan");
+          if (savedHires) setHiringEvents(JSON.parse(savedHires));
         }
+
         const coaData = await sbGet("coa_adjustments");
-        if (coaData && Array.isArray(coaData)) {
+        if (coaData && Array.isArray(coaData) && coaData.length > 0) {
           const coa = {};
           coaData.forEach(row => { if(row.key && row.value!==null) coa[row.key] = row.value; });
           setCoaAdjustments(coa);
+          console.log(`✓ Loaded ${coaData.length} COA adjustments from Supabase`);
+        } else {
+          const savedCoa = localStorage.getItem("coa_adjustments");
+          if (savedCoa) setCoaAdjustments(JSON.parse(savedCoa));
         }
         setSupaStatus("connected");
       } catch(e) {
@@ -4595,10 +4616,17 @@ export default function App() {
     setSaving(true);
     try {
       const rows = Object.entries(coaAdjustments).map(([key, value]) => ({ key, value }));
-      if (rows.length > 0) await sbUpsert("coa_adjustments", rows);
+      // Always save localStorage first
       localStorage.setItem("coa_adjustments", JSON.stringify(coaAdjustments));
-      await sbAudit(currentUser, "UPDATE", "COA", `Saved COA to database (${rows.length} overrides)`);
-    } catch(e) { console.error("COA save failed:", e); }
+      if (rows.length > 0) {
+        const ok = await sbUpsert("coa_adjustments", rows);
+        if (!ok) throw new Error("Supabase upsert returned not-ok");
+        console.log("COA saved to Supabase:", rows.length, "rows");
+      }
+      await sbAudit(currentUser, "UPDATE", "COA", "Saved COA to database (" + rows.length + " overrides)");
+    } catch(e) {
+      console.error("COA Supabase save failed, localStorage fallback used:", e);
+    }
     setSaving(false);
   };
 
@@ -4606,9 +4634,18 @@ export default function App() {
     setSaving(true);
     try {
       const rows = Object.entries(unitAdjustments).map(([key, value]) => ({key, value}));
-      if (rows.length > 0) await sbUpsert("unit_adjustments", rows);
+      // Always save to localStorage first as reliable fallback
+      localStorage.setItem("unit_model_adjustments", JSON.stringify(unitAdjustments));
+      if (rows.length > 0) {
+        const ok = await sbUpsert("unit_adjustments", rows);
+        if (!ok) throw new Error("Supabase upsert returned not-ok");
+      }
       await sbAudit(currentUser, "UPDATE", "UNIT", `Saved unit adjustments (${rows.length} overrides)`);
-    } catch(e) { console.error("Save failed:", e); }
+      console.log(`✓ Unit adjustments saved: ${rows.length} rows`);
+    } catch(e) {
+      console.error("Supabase save failed, localStorage used as fallback:", e);
+      // localStorage already saved above — data is safe
+    }
     setSaving(false);
   };
 
