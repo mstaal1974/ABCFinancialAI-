@@ -1908,7 +1908,6 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
   const isActualMonth = useCallback((mk) => activeFY === "FY26" && ACTUALS_FY26_MKS.has(mk), [activeFY]);
 
   const startEdit = (account, mk, current) => {
-    if (STAFFING_CALC_ROWS.has(account)) return;
     setActiveCell({ account, mk });
     setCellValue(String(current));
   };
@@ -2183,7 +2182,7 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
           <div>
             <h3 className="text-sm font-bold text-slate-800">Chart of Accounts — {FY_LABELS[activeFY]}</h3>
             <p className="text-[10px] text-slate-400 mt-0.5">
-              🔒 Wages, Super & Payroll Tax auto-calculated from staffing · Click any other cell to edit
+              ⚡ Wages, Super & Payroll Tax auto-calculated from staffing (click to override — changes are audit-logged)
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -2244,20 +2243,22 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
                   ...rows.map((ac) => {
                     const isLocked = STAFFING_CALC_ROWS.has(ac.account);
                     const rt = rowTotals.find(r => r.account === ac.account) || {};
-                    const hasEdits = !isLocked && fyMonths.some(({mk}) => coaAdjustments[`${activeFY}|${ac.account}|${mk}`] !== undefined);
+                    const hasEdits = fyMonths.some(({mk}) => coaAdjustments[`${activeFY}|${ac.account}|${mk}`] !== undefined);
                     return (
-                      <tr key={ac.account} className={`border-b border-slate-100 group ${isLocked ? "bg-slate-50/60" : section==="Direct Costs" ? "bg-orange-50/10" : ""}`}>
+                      <tr key={ac.account} className={`border-b border-slate-100 group ${isLocked ? "bg-amber-50/30" : section==="Direct Costs" ? "bg-orange-50/10" : ""}`}>
                         <td className="px-4 py-2 text-slate-400 text-[10px] sticky left-0 bg-inherit border-r border-slate-100">{ac.section}</td>
                         <td className="px-4 py-2 font-medium text-slate-700 whitespace-nowrap border-r border-slate-100">
                           <div className="flex items-center gap-1.5">
                             {isLocked
-                              ? <span title="Auto-calculated from staffing" className="text-slate-400 text-[10px]">🔒</span>
-                              : hasEdits
-                                ? <button onClick={() => resetRow(ac.account)} title="Reset to default" className="text-blue-400 hover:text-rose-500 text-[10px] font-bold">↺</button>
-                                : <span className="w-3"/>
+                              ? <span title="Auto-calculated from staffing — edits are audit-logged" className="text-amber-500 text-[10px]">⚡</span>
+                              : null
+                            }
+                            {hasEdits
+                              ? <button onClick={() => resetRow(ac.account)} title="Reset to default" className="text-blue-400 hover:text-rose-500 text-[10px] font-bold">↺</button>
+                              : <span className="w-3"/>
                             }
                             {ac.account}
-                            {isLocked && <span className="text-[9px] text-slate-400 ml-1">auto</span>}
+                            {isLocked && <span className="text-[9px] text-amber-600 ml-1 font-semibold">staffing</span>}
                           </div>
                         </td>
                         {fyMonths.map(({ mk, label }, colIdx) => {
@@ -2266,15 +2267,15 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
                           const showActual  = viewMode === "actuals" && isActualMonth(mk) && actualVal !== null;
                           const displayVal  = forecastVal;
                           const isActive    = activeCell?.account === ac.account && activeCell?.mk === mk;
-                          const isEdited    = !isLocked && coaAdjustments[`${activeFY}|${ac.account}|${mk}`] !== undefined;
+                          const isEdited    = coaAdjustments[`${activeFY}|${ac.account}|${mk}`] !== undefined;
                           const variance    = showActual ? actualVal - forecastVal : null;
                           const varPct      = forecastVal > 0 && variance !== null ? (variance / forecastVal * 100) : null;
                           return (
                             <td key={label}
-                              onClick={() => !showActual && !isLocked && !isActive && startEdit(ac.account, mk, displayVal)}
+                              onClick={() => !showActual && !isActive && startEdit(ac.account, mk, displayVal)}
                               title={showActual ? `Actual: $${actualVal?.toLocaleString()} | Forecast: $${forecastVal.toLocaleString()}` : (forecastVal > 0 ? `$${forecastVal.toLocaleString()}` : undefined)}
                               className={`px-1 border-r border-slate-100 text-center
-                                ${showActual ? "py-1 bg-emerald-50/40 cursor-default min-w-[110px]" : isLocked ? "py-1 cursor-default" : "py-1 cursor-pointer hover:bg-indigo-50"}
+                                ${showActual ? "py-1 bg-emerald-50/40 cursor-default min-w-[110px]" : "py-1 cursor-pointer hover:bg-indigo-50"}
                                 ${isActive ? "bg-rose-50 ring-2 ring-inset ring-rose-400" : ""}
                                 ${isEdited && !showActual ? "bg-blue-50/60" : ""}
                               `}
@@ -4346,12 +4347,1370 @@ Always be specific with dollar amounts. Format numbers as AUD. Be concise but th
     </>
   );
 }
+
+// ─── STAFFING VIEW ────────────────────────────────────────────────────────────
+// Groups for display and allocation
+const STAFFING_GROUPS = [
+  {
+    id: "trainers",
+    label: "Trainers",
+    color: "#0891b2",
+    bg: "bg-cyan-50",
+    border: "border-cyan-200",
+    text: "text-cyan-700",
+    badge: "bg-cyan-100 text-cyan-800",
+    roles: ["Trainer", "Trainer Pathways"],
+  },
+  {
+    id: "sales",
+    label: "Sales",
+    color: "#7c3aed",
+    bg: "bg-purple-50",
+    border: "border-purple-200",
+    text: "text-purple-700",
+    badge: "bg-purple-100 text-purple-800",
+    roles: ["Sales"],
+  },
+  {
+    id: "admin",
+    label: "Administration",
+    color: "#059669",
+    bg: "bg-emerald-50",
+    border: "border-emerald-200",
+    text: "text-emerald-700",
+    badge: "bg-emerald-100 text-emerald-800",
+    roles: ["Administrator"],
+  },
+  {
+    id: "management",
+    label: "Management",
+    color: "#d97706",
+    bg: "bg-amber-50",
+    border: "border-amber-200",
+    text: "text-amber-700",
+    badge: "bg-amber-100 text-amber-800",
+    roles: ["Manager", "General Manager"],
+  },
+  {
+    id: "senior",
+    label: "Senior Management",
+    color: "#dc2626",
+    bg: "bg-rose-50",
+    border: "border-rose-200",
+    text: "text-rose-700",
+    badge: "bg-rose-100 text-rose-800",
+    roles: ["Executive"],
+  },
+];
+
+function getGroupForRole(roleName) {
+  return STAFFING_GROUPS.find(g => g.roles.includes(roleName)) || STAFFING_GROUPS[2];
+}
+
+// Compute annual cost for a single BUDGET_INPUTS row
+function annualCostForEntry(e) {
+  const gross    = e.base_salary + (e.car_allowance || 0) + (e.phone_allowance || 0);
+  const superAmt = e.base_salary * 0.12;
+  const payroll  = (gross + superAmt) * 0.055;
+  return (gross + superAmt + payroll) * e.number;
+}
+function monthlyCostForEntry(e) { return annualCostForEntry(e) / 12; }
+
+// Build effective BUDGET_INPUTS from base + peopleOverrides
+function effectivePeople(peopleOverrides) {
+  // peopleOverrides is: { "Trainer|NSW": { number: 5, base_salary: 88000, car_allowance: 12000, phone_allowance: 1200 }, ... }
+  return BUDGET_INPUTS.map(b => {
+    const key = `${b.role}|${b.location}`;
+    const ov = peopleOverrides[key];
+    return ov ? { ...b, ...ov } : { ...b };
+  });
+}
+
+// ─── Small donut chart (custom SVG) ─────────────────────────────────────────
+function DonutChart({ data, size = 180, thickness = 34, label, sublabel }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+  let cumulative = 0;
+  const cx = size / 2, cy = size / 2, r = (size - thickness) / 2;
+  const circumference = 2 * Math.PI * r;
+  const segments = data.map(d => {
+    const pct = d.value / total;
+    const offset = circumference * (1 - cumulative);
+    const dasharray = `${circumference * pct} ${circumference * (1 - pct)}`;
+    cumulative += pct;
+    return { ...d, offset, dasharray };
+  });
+  return (
+    <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        {segments.map((s, i) => (
+          <circle key={i} cx={cx} cy={cy} r={r}
+            fill="none" stroke={s.color} strokeWidth={thickness}
+            strokeDasharray={s.dasharray}
+            strokeDashoffset={-s.offset}
+            strokeLinecap="round"
+            style={{ transition: "all 0.4s ease" }}
+          />
+        ))}
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-2xl font-black text-slate-800">{label}</span>
+        {sublabel && <span className="text-xs text-slate-400 mt-0.5">{sublabel}</span>}
+      </div>
+    </div>
+  );
+}
+
+function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, hiringEvents = [] }) {
+  const [activeGroup, setActiveGroup] = useState(null);
+  const [editCell, setEditCell] = useState(null); // { key, field }
+  const [editVal, setEditVal]   = useState("");
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addForm, setAddForm] = useState({ role: "", location: "", base_salary: 70000, car_allowance: 0, phone_allowance: 0, number: 1 });
+  const [activeFY, setActiveFY] = useState("FY26");
+  const editInputRef = useCallback(node => { if (node) { node.focus(); node.select(); } }, []);
+
+  const people = useMemo(() => effectivePeople(peopleOverrides), [peopleOverrides]);
+  const filledHires = useMemo(() => hiringEvents.filter(e => e.filled), [hiringEvents]);
+
+  // ── Group summaries ────────────────────────────────────────────────────────
+  const groupStats = useMemo(() => {
+    return STAFFING_GROUPS.map(g => {
+      const members = people.filter(p => g.roles.includes(p.role));
+      const headcount = members.reduce((s, p) => s + p.number, 0);
+      const annualCost = members.reduce((s, p) => s + annualCostForEntry(p), 0);
+      const avgSalary = headcount > 0
+        ? members.reduce((s, p) => s + p.base_salary * p.number, 0) / headcount
+        : 0;
+      return { ...g, headcount, annualCost, avgSalary, members };
+    });
+  }, [people]);
+
+  const totalHeadcount = groupStats.reduce((s, g) => s + g.headcount, 0);
+  const totalAnnualCost = groupStats.reduce((s, g) => s + g.annualCost, 0);
+
+  // Confirmed hired additional headcount
+  const confirmedHires = filledHires.filter(e => e.eventType !== "departure").length;
+  const confirmedDepartures = filledHires.filter(e => e.eventType === "departure").length;
+
+  // ── Chart data ─────────────────────────────────────────────────────────────
+  const donutData = groupStats.filter(g => g.headcount > 0).map(g => ({
+    label: g.label, value: g.headcount, color: g.color,
+  }));
+
+  const costDonutData = groupStats.filter(g => g.annualCost > 0).map(g => ({
+    label: g.label, value: g.annualCost, color: g.color,
+  }));
+
+  // Monthly payroll trend across 3 FYs
+  const monthlyTrendData = useMemo(() => {
+    return MONTH_SCHEDULE.slice(0, 36).map(({ label, mk, fy }) => {
+      const inflation = COST_INFLATION[fy] || 1;
+      const base = people.reduce((s, p) => s + monthlyCostForEntry(p), 0) * inflation;
+      const hireAdd = filledHires.reduce((si, ev) => {
+        const evIdx = MONTH_SCHEDULE.findIndex(m => m.label === ev.startMonth);
+        const curIdx = MONTH_SCHEDULE.findIndex(m => m.label === label);
+        if (evIdx < 0 || curIdx < evIdx) return si;
+        const role = STAFF_ROLES.find(r => r.id === ev.roleId);
+        if (!role) return si;
+        const mc = ((role.baseWage + role.carAllowance + role.phoneAllowance) + role.baseWage * 0.12) * (1 + role.payrollTaxRate) / 12 * ev.count;
+        return si + (ev.eventType === "departure" ? -mc : mc);
+      }, 0);
+      const groupBreakdown = {};
+      groupStats.forEach(g => {
+        const gCost = g.members.reduce((s, p) => s + monthlyCostForEntry(p) * inflation, 0);
+        groupBreakdown[g.id] = Math.round(gCost);
+      });
+      return { month: label, fy, total: Math.round(base + hireAdd), ...groupBreakdown };
+    });
+  }, [people, filledHires, groupStats]);
+
+  // Filter to active FY
+  const trendInFY = useMemo(() => monthlyTrendData.filter(d => d.fy === activeFY), [monthlyTrendData, activeFY]);
+
+  // Cost breakdown (base / allowances / super / payroll tax)
+  const costComponents = useMemo(() => {
+    const base = people.reduce((s, p) => s + p.base_salary * p.number, 0);
+    const allowances = people.reduce((s, p) => s + (p.car_allowance + p.phone_allowance) * p.number, 0);
+    const superAmt = people.reduce((s, p) => s + p.base_salary * 0.12 * p.number, 0);
+    const payroll = people.reduce((s, p) => {
+      const g = p.base_salary + p.car_allowance + p.phone_allowance;
+      return s + (g + p.base_salary * 0.12) * 0.055 * p.number;
+    }, 0);
+    return [
+      { name: "Base Salary", value: base, color: "#0891b2" },
+      { name: "Allowances", value: allowances, color: "#7c3aed" },
+      { name: "Superannuation", value: superAmt, color: "#059669" },
+      { name: "Payroll Tax", value: payroll, color: "#d97706" },
+    ];
+  }, [people]);
+
+  // ── Edit handlers ──────────────────────────────────────────────────────────
+  const startEdit = (key, field, current) => {
+    setEditCell({ key, field });
+    setEditVal(String(current));
+  };
+
+  const commitEdit = () => {
+    if (!editCell) return;
+    const v = parseFloat(editVal);
+    if (isNaN(v) || v < 0) { setEditCell(null); return; }
+    const val = editCell.field === "number" ? Math.max(0, Math.round(v)) : Math.max(0, Math.round(v));
+    onUpdatePeople(editCell.key, editCell.field, val);
+    setEditCell(null);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+    else if (e.key === "Escape") setEditCell(null);
+  };
+
+  // ── Derived display ───────────────────────────────────────────────────────
+  const displayGroups = activeGroup
+    ? groupStats.filter(g => g.id === activeGroup)
+    : groupStats;
+
+  const fmtK = v => v >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`;
+
+  return (
+    <div className="space-y-6">
+
+      {/* ── Header ── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <Users size={20} className="text-cyan-600"/>Staffing Overview
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Manage headcount by group · Click any cell to edit · Changes flow to Expenses & Forecasts
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors">
+            <Plus size={13}/>Add Role
+          </button>
+          <button onClick={onSavePeople}
+            className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors">
+            <Database size={12}/>{saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── KPI Summary Cards ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { label: "Total Headcount", value: totalHeadcount, sub: `${confirmedHires > 0 ? `+${confirmedHires} planned hires` : "No planned hires"}`, color: "bg-cyan-500", icon: Users },
+          { label: "Total Annual Cost", value: fmtK(totalAnnualCost), sub: "Base + super + payroll tax", color: "bg-purple-500", icon: DollarSign },
+          { label: "Monthly Payroll", value: fmtK(totalAnnualCost / 12), sub: "Avg per month (FY26)", color: "bg-emerald-500", icon: CreditCard },
+          { label: "Avg Salary", value: fmtK(totalHeadcount > 0 ? people.reduce((s,p)=>s+p.base_salary*p.number,0)/totalHeadcount : 0), sub: "Weighted average base", color: "bg-amber-500", icon: TrendUp },
+        ].map(c => (
+          <div key={c.label} className="bg-white rounded-xl border border-slate-100 p-4 flex gap-3 items-start">
+            <div className={`p-2.5 rounded-xl ${c.color} text-white shrink-0`}><c.icon size={18}/></div>
+            <div>
+              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">{c.label}</p>
+              <p className="text-xl font-black text-slate-800 mt-0.5">{c.value}</p>
+              <p className="text-[10px] text-slate-400 mt-0.5">{c.sub}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Charts Row ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+        {/* Headcount Donut */}
+        <div className="bg-white rounded-xl border border-slate-100 p-5 flex flex-col items-center">
+          <h3 className="text-sm font-bold text-slate-700 mb-4 self-start">Headcount Composition</h3>
+          <DonutChart data={donutData} size={180} thickness={32}
+            label={totalHeadcount} sublabel="people" />
+          <div className="mt-4 space-y-1.5 w-full">
+            {groupStats.filter(g => g.headcount > 0).map(g => (
+              <div key={g.id} className="flex items-center gap-2 text-xs cursor-pointer"
+                onClick={() => setActiveGroup(activeGroup === g.id ? null : g.id)}>
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: g.color }}/>
+                <span className={`flex-1 font-medium ${activeGroup === g.id ? "font-bold" : "text-slate-600"}`}>{g.label}</span>
+                <span className="text-slate-500 font-mono">{g.headcount}</span>
+                <span className="text-slate-400">({totalHeadcount > 0 ? Math.round(g.headcount/totalHeadcount*100) : 0}%)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Cost Donut */}
+        <div className="bg-white rounded-xl border border-slate-100 p-5 flex flex-col items-center">
+          <h3 className="text-sm font-bold text-slate-700 mb-4 self-start">Annual Cost by Group</h3>
+          <DonutChart data={costDonutData} size={180} thickness={32}
+            label={fmtK(totalAnnualCost)} sublabel="total p.a." />
+          <div className="mt-4 space-y-1.5 w-full">
+            {groupStats.filter(g => g.annualCost > 0).map(g => (
+              <div key={g.id} className="flex items-center gap-2 text-xs">
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: g.color }}/>
+                <span className="flex-1 text-slate-600">{g.label}</span>
+                <span className="text-slate-700 font-mono font-semibold">{fmtK(g.annualCost)}</span>
+                <span className="text-slate-400">({totalAnnualCost > 0 ? Math.round(g.annualCost/totalAnnualCost*100) : 0}%)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Cost Components */}
+        <div className="bg-white rounded-xl border border-slate-100 p-5">
+          <h3 className="text-sm font-bold text-slate-700 mb-4">Cost Component Breakdown</h3>
+          <div className="space-y-3">
+            {costComponents.map(c => (
+              <div key={c.name}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-600 font-medium">{c.name}</span>
+                  <span className="font-mono font-semibold text-slate-700">{fmtK(c.value)}</span>
+                </div>
+                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500"
+                    style={{ width: `${totalAnnualCost > 0 ? (c.value/totalAnnualCost*100) : 0}%`, background: c.color }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <div className="flex justify-between text-xs">
+              <span className="font-bold text-slate-700">Total Annual Cost</span>
+              <span className="font-black text-slate-800">{fmtK(totalAnnualCost)}</span>
+            </div>
+            <div className="flex justify-between text-xs mt-1">
+              <span className="text-slate-400">Monthly Average</span>
+              <span className="font-semibold text-slate-600">{fmtK(totalAnnualCost/12)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Monthly Trend Chart ── */}
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 className="text-sm font-bold text-slate-700">Monthly Payroll by Group</h3>
+          <div className="flex gap-1">
+            {["FY26","FY27","FY28"].map(fy => (
+              <button key={fy} onClick={() => setActiveFY(fy)}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${activeFY===fy ? "bg-cyan-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                {fy}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="h-56">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={trendInFY} barSize={18}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+              <XAxis dataKey="month" fontSize={10} tickLine={false} axisLine={false}/>
+              <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={10} tickLine={false} axisLine={false}/>
+              <Tooltip formatter={(v, n) => [fmtK(v), n]} contentStyle={{ borderRadius: "8px", border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}/>
+              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingTop: 8 }}/>
+              {STAFFING_GROUPS.map(g => (
+                <Bar key={g.id} dataKey={g.id} name={g.label} stackId="a" fill={g.color}/>
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── Group Filter Pills ── */}
+      <div className="flex gap-2 flex-wrap">
+        <button onClick={() => setActiveGroup(null)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${!activeGroup ? "bg-slate-800 text-white border-slate-800" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400"}`}>
+          All Groups
+        </button>
+        {STAFFING_GROUPS.map(g => (
+          <button key={g.id} onClick={() => setActiveGroup(activeGroup === g.id ? null : g.id)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${activeGroup===g.id ? "text-white border-transparent" : `${g.bg} ${g.border} ${g.text} hover:opacity-80`}`}
+            style={activeGroup === g.id ? { background: g.color, borderColor: g.color } : {}}>
+            {g.label} · {groupStats.find(x=>x.id===g.id)?.headcount || 0}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Staffing Table by Group ── */}
+      {displayGroups.map(g => (
+        <div key={g.id} className={`bg-white rounded-xl border-2 ${g.border} overflow-hidden`}>
+          {/* Group header */}
+          <div className={`px-5 py-3 ${g.bg} flex items-center justify-between flex-wrap gap-2`}>
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full" style={{ background: g.color }}/>
+              <h3 className={`text-sm font-bold ${g.text}`}>{g.label}</h3>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${g.badge}`}>
+                {g.headcount} {g.headcount === 1 ? "person" : "people"}
+              </span>
+            </div>
+            <div className="flex items-center gap-4 text-xs">
+              <span className={`font-semibold ${g.text}`}>{fmtK(g.annualCost)} / yr</span>
+              <span className="text-slate-500">{fmtK(g.annualCost/12)} / mo</span>
+              {g.headcount > 0 && <span className="text-slate-400">avg base {fmtK(g.avgSalary)}</span>}
+            </div>
+          </div>
+
+          {/* Members table */}
+          {g.members.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 border-b border-slate-100">
+                  <tr>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500">Role</th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500">Location</th>
+                    <th className="px-3 py-2.5 text-center font-semibold text-slate-500">Headcount</th>
+                    <th className="px-3 py-2.5 text-right font-semibold text-slate-500">Base Salary</th>
+                    <th className="px-3 py-2.5 text-right font-semibold text-slate-500">Car Allow.</th>
+                    <th className="px-3 py-2.5 text-right font-semibold text-slate-500">Phone Allow.</th>
+                    <th className="px-3 py-2.5 text-right font-semibold text-slate-500">Super</th>
+                    <th className="px-3 py-2.5 text-right font-semibold text-slate-500">Payroll Tax</th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500 bg-slate-100">Total Cost p.a.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {g.members.map((p, ri) => {
+                    const key = `${p.role}|${p.location}`;
+                    const superAmt = p.base_salary * 0.12;
+                    const payrollAmt = (p.base_salary + p.car_allowance + p.phone_allowance + superAmt) * 0.055;
+                    const isEdited = !!peopleOverrides[key];
+                    const editableFields = [
+                      { field: "number",          val: p.number,          fmt: v => v,                      center: true },
+                      { field: "base_salary",     val: p.base_salary,     fmt: v => `$${v.toLocaleString()}`, center: false },
+                      { field: "car_allowance",   val: p.car_allowance,   fmt: v => v > 0 ? `$${v.toLocaleString()}` : "—", center: false },
+                      { field: "phone_allowance", val: p.phone_allowance, fmt: v => v > 0 ? `$${v.toLocaleString()}` : "—", center: false },
+                    ];
+                    return (
+                      <tr key={key} className={`border-b border-slate-50 hover:bg-slate-50/50 ${isEdited ? "bg-blue-50/20" : ""}`}>
+                        <td className="px-4 py-2 font-medium text-slate-700">
+                          <div className="flex items-center gap-1.5">
+                            {isEdited && <button onClick={() => onUpdatePeople(key, "__reset__", null)} title="Reset to default" className="text-blue-400 hover:text-rose-500 text-[10px] font-bold">↺</button>}
+                            {p.role}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2 text-slate-500">{p.location}</td>
+                        {editableFields.map(ef => {
+                          const isActive = editCell?.key === key && editCell?.field === ef.field;
+                          return (
+                            <td key={ef.field}
+                              onClick={() => !isActive && startEdit(key, ef.field, ef.val)}
+                              className={`px-3 py-2 cursor-pointer ${ef.center ? "text-center" : "text-right"}
+                                ${isActive ? "bg-cyan-50 ring-2 ring-inset ring-cyan-400" : "hover:bg-cyan-50/50"}
+                                font-mono`}>
+                              {isActive ? (
+                                <input ref={editInputRef} type="number" min="0"
+                                  value={editVal}
+                                  onChange={e => setEditVal(e.target.value)}
+                                  onBlur={commitEdit}
+                                  onKeyDown={handleKeyDown}
+                                  className="w-full bg-transparent outline-none text-cyan-700 font-bold text-center text-xs"/>
+                              ) : (
+                                <span className={`text-xs ${ef.field === "number" ? "font-bold text-slate-800" : "text-slate-600"}`}>
+                                  {ef.field === "number" ? p.number : ef.fmt(ef.val)}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{fmtK(superAmt * p.number)}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{fmtK(payrollAmt * p.number)}</td>
+                        <td className="px-4 py-2 text-right font-bold text-slate-800 font-mono bg-slate-50 text-xs">{fmtK(annualCostForEntry(p))}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="bg-slate-50 border-t-2 border-slate-200">
+                  <tr>
+                    <td colSpan={2} className="px-4 py-2 font-bold text-slate-600 text-xs">Group Total</td>
+                    <td className="px-3 py-2 text-center font-black text-slate-800 text-xs">{g.headcount}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+p.base_salary*p.number,0))}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.car_allowance||0)*p.number,0))}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.phone_allowance||0)*p.number,0))}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+p.base_salary*0.12*p.number,0))}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.base_salary+p.car_allowance+p.phone_allowance+p.base_salary*0.12)*0.055*p.number,0))}</td>
+                    <td className="px-4 py-2 text-right font-black text-cyan-700 font-mono bg-slate-100 text-xs">{fmtK(g.annualCost)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ) : (
+            <div className="px-5 py-6 text-center text-slate-400 text-sm">No staff in this group yet.</div>
+          )}
+        </div>
+      ))}
+
+      {/* ── Add Role Modal ── */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-base font-bold text-slate-800">Add Role to Staffing</h3>
+              <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-600"><X size={18}/></button>
+            </div>
+            <div className="space-y-3">
+              {[
+                { label: "Role Title", field: "role", type: "text", placeholder: "e.g. Senior Trainer" },
+                { label: "Location", field: "location", type: "text", placeholder: "e.g. QLD" },
+                { label: "Base Salary ($)", field: "base_salary", type: "number", placeholder: "85000" },
+                { label: "Car Allowance ($)", field: "car_allowance", type: "number", placeholder: "0" },
+                { label: "Phone Allowance ($)", field: "phone_allowance", type: "number", placeholder: "0" },
+                { label: "Number of People", field: "number", type: "number", placeholder: "1" },
+              ].map(f => (
+                <div key={f.field}>
+                  <label className="text-xs font-semibold text-slate-500 mb-1 block">{f.label}</label>
+                  <input type={f.type} placeholder={f.placeholder}
+                    value={addForm[f.field]}
+                    onChange={e => setAddForm(prev => ({ ...prev, [f.field]: f.type === "number" ? parseFloat(e.target.value)||0 : e.target.value }))}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-cyan-400 outline-none"/>
+                </div>
+              ))}
+              {/* Preview cost */}
+              {addForm.role && addForm.number > 0 && (
+                <div className="mt-2 p-3 bg-cyan-50 rounded-lg border border-cyan-200 text-xs text-cyan-700">
+                  <strong>Estimated annual cost: </strong>
+                  {fmtK(annualCostForEntry({ ...addForm, number: addForm.number }))}
+                  <span className="text-cyan-500 ml-1">(inc. super + payroll tax)</span>
+                </div>
+              )}
+              <div className="flex gap-2 mt-4">
+                <button onClick={() => setShowAddModal(false)}
+                  className="flex-1 py-2 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-50">Cancel</button>
+                <button onClick={() => {
+                  if (!addForm.role || !addForm.location) return;
+                  onUpdatePeople(`${addForm.role}|${addForm.location}`, "__add__", addForm);
+                  setShowAddModal(false);
+                  setAddForm({ role: "", location: "", base_salary: 70000, car_allowance: 0, phone_allowance: 0, number: 1 });
+                }}
+                  className="flex-1 py-2 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-sm font-semibold">
+                  Add to Staffing
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="px-2 py-1 text-[10px] text-slate-400 flex items-center gap-4">
+        <span><strong>Click</strong> any headcount or salary cell to edit</span>
+        <span className="text-blue-500">■ = manually edited from default</span>
+        <span>↺ = reset to default</span>
+        <span className="ml-auto text-slate-300">Changes are audit-logged and flow to Expenses & Staff Planner</span>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── CASH FLOW FORECAST (ROLLING 13-WEEK) ────────────────────────────────────
+
+// Government claim cycles for Australian RTOs
+const CLAIM_CYCLES = [
+  { id: "qld_skills",  label: "QLD Skills Assure",   color: "#f59e0b", dayOfMonth: 15,  lagWeeks: 3 },
+  { id: "nsw_skills",  label: "NSW Smart & Skilled",  color: "#3b82f6", dayOfMonth: 1,   lagWeeks: 4 },
+  { id: "nt_training", label: "NT Training",          color: "#ef4444", dayOfMonth: 20,  lagWeeks: 2 },
+  { id: "tas_sgs",     label: "TAS SGS",              color: "#10b981", dayOfMonth: 10,  lagWeeks: 3 },
+  { id: "fee_for_svc", label: "Fee-for-Service",      color: "#8b5cf6", dayOfMonth: 0,   lagWeeks: 0 }, // weekly
+];
+
+// Scheduled recurring payments (day-of-month triggers)
+const SCHEDULED_PAYMENTS = [
+  { id: "payroll_1",   label: "Payroll (fortnightly A)", color: "#e11d48", dayOfMonth: 14, biweekly: true, weekOffset: 0 },
+  { id: "payroll_2",   label: "Payroll (fortnightly B)", color: "#e11d48", dayOfMonth: 28, biweekly: true, weekOffset: 1 },
+  { id: "rent",        label: "Rent & Facilities",      color: "#6366f1", dayOfMonth: 1,  biweekly: false },
+  { id: "super",       label: "Superannuation",         color: "#06b6d4", dayOfMonth: 28, biweekly: false, quarterly: true },
+  { id: "payroll_tax", label: "Payroll Tax (state)",    color: "#f97316", dayOfMonth: 7,  biweekly: false, monthly: true  },
+];
+
+// Build 13 weeks of data from a start date + monthly model data
+function build13WeekForecast(operationalFinancials, startingBalance, cashOverrides = {}) {
+  // Start from Mar-26 (week of Mar 2, 2026)
+  const START = new Date(2026, 2, 2); // Mar 2 2026
+  const weeks = [];
+
+  // Get monthly revenue/payment data indexed by "Mon-YY"
+  const monthlyMap = {};
+  operationalFinancials.forEach(op => { monthlyMap[op.month] = op; });
+
+  // Helper: which month label does a date fall in?
+  const MO_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monthLabel = d => `${MO_SHORT[d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
+
+  let balance = startingBalance;
+
+  for (let w = 0; w < 13; w++) {
+    const weekStart = new Date(START);
+    weekStart.setDate(START.getDate() + w * 7);
+    const weekEnd   = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+
+    const wLabel = `W${w+1} ${weekStart.getDate()} ${MO_SHORT[weekStart.getMonth()]}`;
+    const wKey   = `week_${w}`;
+    const mLabel = monthLabel(weekStart);
+    const op     = monthlyMap[mLabel] || { payments: 0 };
+
+    // Revenue receipts this week (government cycles)
+    // QLD: mid-month, ~$180k/month → weekly spread with a spike at week containing 15th
+    const qldWeekly = (op && op.revenue) ? op.revenue * 0.55 / 4 : 45000;
+    const nswWeekly = (op && op.revenue) ? op.revenue * 0.25 / 4 : 18000;
+    const ntWeekly  = (op && op.revenue) ? op.revenue * 0.08 / 4 : 5500;
+    const tasWeekly = (op && op.revenue) ? op.revenue * 0.05 / 4 : 3500;
+    const ffsWeekly = (op && op.revenue) ? op.revenue * 0.07 / 4 : 4800;
+
+    // Spike claims on government payment days
+    const dayInMonth = weekStart.getDate();
+    const qldSpike  = (dayInMonth >= 13 && dayInMonth <= 19) ? qldWeekly * 2.2 : qldWeekly * 0.6;
+    const nswSpike  = (dayInMonth >= 1  && dayInMonth <= 7)  ? nswWeekly * 2.8 : nswWeekly * 0.4;
+    const ntSpike   = (dayInMonth >= 18 && dayInMonth <= 24) ? ntWeekly  * 2.5 : ntWeekly  * 0.5;
+
+    const receipts = {
+      qld_skills:  Math.round(cashOverrides[`${wKey}_qld`]  ?? qldSpike),
+      nsw_skills:  Math.round(cashOverrides[`${wKey}_nsw`]  ?? nswSpike),
+      nt_training: Math.round(cashOverrides[`${wKey}_nt`]   ?? ntSpike),
+      tas_sgs:     Math.round(cashOverrides[`${wKey}_tas`]  ?? tasWeekly),
+      fee_for_svc: Math.round(cashOverrides[`${wKey}_ffs`]  ?? ffsWeekly),
+    };
+    const totalReceipts = Object.values(receipts).reduce((s,v) => s+v, 0);
+
+    // Outgoings this week
+    const weeklyPayroll   = (op.payments || 0) * 0.56 / 4; // wages = ~56% of payments
+    const weeklyOverheads = (op.payments || 0) * 0.44 / 4;
+    // Payroll spikes on fortnightly dates
+    const payrollSpike  = (dayInMonth >= 12 && dayInMonth <= 16) || (dayInMonth >= 26 && dayInMonth <= 30)
+      ? weeklyPayroll * 2.0 : weeklyPayroll * 0;
+    const rentSpike     = (dayInMonth >= 1 && dayInMonth <= 7) ? 19194 : 0;
+    const superSpike    = (dayInMonth >= 26 && dayInMonth <= 31 && weekStart.getMonth() % 3 === 2) ? 38000 : 0;
+
+    const payments = {
+      payroll:     Math.round(cashOverrides[`${wKey}_payroll`]  ?? payrollSpike),
+      rent:        Math.round(cashOverrides[`${wKey}_rent`]     ?? rentSpike),
+      super:       Math.round(cashOverrides[`${wKey}_super`]    ?? superSpike),
+      overheads:   Math.round(cashOverrides[`${wKey}_overhead`] ?? weeklyOverheads),
+    };
+    const totalPayments = Object.values(payments).reduce((s,v) => s+v, 0);
+
+    // One-off items
+    const oneOff = cashOverrides[`${wKey}_oneoff`] || 0;
+
+    const opening = balance;
+    const net     = totalReceipts - totalPayments + oneOff;
+    balance       = opening + net;
+
+    weeks.push({
+      wKey, label: wLabel, weekStart: weekStart.toISOString().slice(0,10),
+      mLabel, w,
+      opening: Math.round(opening),
+      receipts, totalReceipts,
+      payments, totalPayments,
+      oneOff,
+      net: Math.round(net),
+      closing: Math.round(balance),
+    });
+  }
+  return weeks;
+}
+
+function CashFlowForecastView({ data }) {
+  const [cashOverrides, setCashOverrides] = useState({});
+  const [editCell, setEditCell] = useState(null);
+  const [editVal,  setEditVal]  = useState("");
+  const [viewMode, setViewMode] = useState("summary"); // summary | detail
+  const [addOneOff, setAddOneOff] = useState(null); // week key
+  const [oneOffAmt, setOneOffAmt] = useState("");
+  const [oneOffLabel, setOneOffLabel] = useState("");
+  const inputRef = useCallback(n => { if(n) { n.focus(); n.select(); } }, []);
+
+  // Derive starting balance from last actual (Feb-26)
+  const startingBalance = useMemo(() => {
+    const febOp = data.operationalFinancials.find(op => op.month === "Feb-26");
+    return febOp ? Math.round(febOp.closingBalance) : 850000;
+  }, [data]);
+
+  const weeks = useMemo(() =>
+    build13WeekForecast(data.operationalFinancials, startingBalance, cashOverrides),
+  [data, startingBalance, cashOverrides]);
+
+  const minBalance = Math.min(...weeks.map(w => w.closing));
+  const maxBalance = Math.max(...weeks.map(w => w.closing));
+  const totalIn    = weeks.reduce((s, w) => s + w.totalReceipts, 0);
+  const totalOut   = weeks.reduce((s, w) => s + w.totalPayments, 0);
+
+  // Chart data
+  const chartData = weeks.map(w => ({
+    week: w.label,
+    opening: w.opening,
+    closing: w.closing,
+    receipts: w.totalReceipts,
+    payments: -w.totalPayments,
+    net: w.net,
+    // per-claim
+    qld: w.receipts.qld_skills,
+    nsw: w.receipts.nsw_skills,
+    nt:  w.receipts.nt_training,
+    tas: w.receipts.tas_sgs,
+    ffs: w.receipts.fee_for_svc,
+  }));
+
+  const commitEdit = (wKey, field, raw) => {
+    const v = parseFloat(raw);
+    if (!isNaN(v)) setCashOverrides(prev => ({ ...prev, [`${wKey}_${field}`]: Math.round(v) }));
+    setEditCell(null);
+  };
+
+  const fmtK  = v => v >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v).toLocaleString()}`;
+  const fmtFull = v => `$${Math.abs(Math.round(v)).toLocaleString()}`;
+
+  const balanceColor = v => v < 0 ? "text-rose-600 font-black" : v < 200000 ? "text-amber-600 font-bold" : "text-emerald-600 font-bold";
+
+  // ─ Waterfall chart helper (closing balance line + bar net) ─────────────────
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (!active || !payload?.length) return null;
+    const w = weeks.find(x => x.label === label);
+    if (!w) return null;
+    return (
+      <div className="bg-white rounded-xl shadow-xl border border-slate-200 p-3 text-xs min-w-[180px]">
+        <p className="font-bold text-slate-800 mb-2">{label}</p>
+        <div className="space-y-1">
+          <div className="flex justify-between gap-4"><span className="text-slate-500">Opening</span><span className="font-mono font-semibold">{fmtK(w.opening)}</span></div>
+          <div className="flex justify-between gap-4 text-emerald-600"><span>Receipts</span><span className="font-mono font-semibold">+{fmtK(w.totalReceipts)}</span></div>
+          <div className="flex justify-between gap-4 text-rose-500"><span>Payments</span><span className="font-mono font-semibold">-{fmtK(w.totalPayments)}</span></div>
+          <div className="border-t border-slate-100 pt-1 flex justify-between gap-4"><span className="font-bold text-slate-700">Closing</span><span className={`font-mono ${balanceColor(w.closing)}`}>{fmtK(w.closing)}</span></div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Header ── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <Wallet size={20} className="text-indigo-600"/>
+            13-Week Cash Flow Forecast
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Rolling from 2 Mar 2026 · Starting balance {fmtK(startingBalance)} (Feb-26 close) · Click any cell to override
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {["summary","detail"].map(m => (
+            <button key={m} onClick={() => setViewMode(m)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-all ${viewMode===m ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── KPI Strip ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: "Opening Balance", val: fmtK(startingBalance), sub: "Feb-26 actual close",    color: "bg-indigo-500",  icon: Landmark },
+          { label: "Total Receipts",  val: fmtK(totalIn),         sub: "13-week gross inflows",  color: "bg-emerald-500", icon: TrendingUp },
+          { label: "Total Payments",  val: fmtK(totalOut),        sub: "13-week gross outflows",  color: "bg-rose-500",    icon: TrendingDown },
+          { label: "Closing (Wk 13)", val: fmtK(weeks[12]?.closing || 0), sub: minBalance < 200000 ? "⚠ Balance dips low" : "Healthy trajectory", color: minBalance < 0 ? "bg-rose-600" : minBalance < 200000 ? "bg-amber-500" : "bg-teal-500", icon: Wallet },
+        ].map(c => (
+          <div key={c.label} className="bg-white rounded-xl border border-slate-100 p-4 flex gap-3 items-start">
+            <div className={`${c.color} text-white p-2.5 rounded-xl shrink-0`}><c.icon size={17}/></div>
+            <div>
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">{c.label}</p>
+              <p className="text-xl font-black text-slate-800">{c.val}</p>
+              <p className="text-[10px] text-slate-400">{c.sub}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Balance Trend Chart ── */}
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <h3 className="text-sm font-bold text-slate-700 mb-1">Cash Position Trajectory</h3>
+        <p className="text-[10px] text-slate-400 mb-4">Weekly closing balance with net cash movement bars</p>
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={chartData} barSize={14}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+              <XAxis dataKey="week" fontSize={9} tickLine={false} axisLine={false} tick={{ fill: "#94a3b8" }}/>
+              <YAxis yAxisId="bar" tickFormatter={v => `${v>=0?"+":""} $${Math.round(Math.abs(v)/1000)}k`} fontSize={9} tickLine={false} axisLine={false} tick={{ fill: "#94a3b8" }} width={55}/>
+              <YAxis yAxisId="line" orientation="right" tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={9} tickLine={false} axisLine={false} tick={{ fill: "#94a3b8" }} width={55}/>
+              <Tooltip content={<CustomTooltip/>}/>
+              <ReferenceLine yAxisId="line" y={200000} stroke="#f59e0b" strokeDasharray="4 4" strokeWidth={1.5}/>
+              <Bar yAxisId="bar" dataKey="receipts" name="Receipts" fill="#10b981" opacity={0.6} radius={[3,3,0,0]}/>
+              <Bar yAxisId="bar" dataKey="payments" name="Payments" fill="#e11d48" opacity={0.6} radius={[0,0,3,3]}/>
+              <Line yAxisId="line" type="monotone" dataKey="closing" name="Closing Balance" stroke="#6366f1" strokeWidth={2.5} dot={{ r: 3, fill: "#6366f1" }}/>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <p className="text-[9px] text-amber-600 mt-1">— Dashed line = $200k minimum recommended balance</p>
+      </div>
+
+      {/* ── Government Receipts Chart ── */}
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <h3 className="text-sm font-bold text-slate-700 mb-1">Government Claim Receipts by Source</h3>
+        <p className="text-[10px] text-slate-400 mb-4">Weekly inflows by funding stream — spikes reflect claim payment cycles</p>
+        <div className="h-52">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} barSize={12}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+              <XAxis dataKey="week" fontSize={9} tickLine={false} axisLine={false}/>
+              <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={9} tickLine={false} axisLine={false}/>
+              <Tooltip formatter={(v,n) => [fmtK(v), n]} contentStyle={{ borderRadius:"8px", border:"none", boxShadow:"0 4px 12px rgba(0,0,0,0.08)" }}/>
+              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize:10 }}/>
+              <Bar dataKey="qld" name="QLD Skills Assure"    stackId="a" fill="#f59e0b"/>
+              <Bar dataKey="nsw" name="NSW Smart & Skilled"  stackId="a" fill="#3b82f6"/>
+              <Bar dataKey="nt"  name="NT Training"          stackId="a" fill="#ef4444"/>
+              <Bar dataKey="tas" name="TAS SGS"              stackId="a" fill="#10b981"/>
+              <Bar dataKey="ffs" name="Fee-for-Service"      stackId="a" fill="#8b5cf6" radius={[3,3,0,0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── Weekly Table ── */}
+      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 bg-slate-800 text-white flex items-center justify-between">
+          <h3 className="text-sm font-bold">Week-by-Week Cash Flow Detail</h3>
+          <span className="text-[10px] text-slate-400">Click receipts/payments cells to override · ± for one-off items</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th className="px-3 py-2.5 text-left font-semibold text-slate-500 sticky left-0 bg-slate-50 min-w-[90px]">Week</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-slate-500 min-w-[80px]">Opening</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-emerald-600 min-w-[80px]">QLD Claims</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-blue-600 min-w-[80px]">NSW Claims</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-emerald-500 min-w-[70px]">Other</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-emerald-700 min-w-[80px] bg-emerald-50">Total In</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-rose-500 min-w-[80px]">Payroll</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-purple-500 min-w-[70px]">Rent</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-cyan-500 min-w-[70px]">Super</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-orange-500 min-w-[70px]">Overheads</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-rose-700 min-w-[80px] bg-rose-50">Total Out</th>
+                <th className="px-3 py-2.5 text-center font-semibold text-slate-500 min-w-[60px]">One-off</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-slate-600 min-w-[70px]">Net</th>
+                <th className="px-3 py-2.5 text-right font-semibold text-indigo-700 min-w-[90px] bg-indigo-50">Closing Bal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {weeks.map((w, wi) => {
+                const isLow = w.closing < 200000;
+                const isNeg = w.closing < 0;
+                return (
+                  <tr key={w.wKey} className={`border-b border-slate-50 hover:bg-slate-50/50 ${isNeg ? "bg-rose-50/40" : isLow ? "bg-amber-50/30" : ""}`}>
+                    <td className="px-3 py-2 font-semibold text-slate-700 sticky left-0 bg-inherit">
+                      <div>{w.label}</div>
+                      <div className="text-[9px] text-slate-400 font-normal">{w.mLabel}</div>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-600">{fmtK(w.opening)}</td>
+
+                    {/* QLD Claims — editable */}
+                    {[
+                      { key:"qld", val:w.receipts.qld_skills,  cls:"text-emerald-700" },
+                      { key:"nsw", val:w.receipts.nsw_skills,  cls:"text-blue-600" },
+                    ].map(cell => {
+                      const ck = `${w.wKey}_${cell.key}`;
+                      const isAct = editCell === ck;
+                      return (
+                        <td key={cell.key} onClick={() => { if(!isAct){ setEditCell(ck); setEditVal(String(cell.val)); }}}
+                          className={`px-3 py-2 text-right font-mono cursor-pointer ${cell.cls} ${isAct ? "bg-emerald-50 ring-2 ring-inset ring-emerald-400" : "hover:bg-emerald-50/50"}`}>
+                          {isAct
+                            ? <input ref={inputRef} type="number" min="0" value={editVal} onChange={e=>setEditVal(e.target.value)}
+                                onBlur={() => commitEdit(w.wKey, cell.key, editVal)}
+                                onKeyDown={e => { if(e.key==="Enter"||e.key==="Tab"){e.preventDefault();commitEdit(w.wKey,cell.key,editVal);} else if(e.key==="Escape")setEditCell(null);}}
+                                className="w-full bg-transparent outline-none text-center text-xs font-bold"/>
+                            : fmtK(cell.val)}
+                        </td>
+                      );
+                    })}
+
+                    <td className="px-3 py-2 text-right font-mono text-emerald-500">
+                      {fmtK(w.receipts.nt_training + w.receipts.tas_sgs + w.receipts.fee_for_svc)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-bold font-mono text-emerald-700 bg-emerald-50/60">{fmtK(w.totalReceipts)}</td>
+
+                    {/* Payroll — editable */}
+                    {[
+                      { key:"payroll",  val:w.payments.payroll,    cls:"text-rose-500" },
+                      { key:"rent",     val:w.payments.rent,       cls:"text-purple-500" },
+                      { key:"super",    val:w.payments.super,      cls:"text-cyan-500" },
+                      { key:"overhead", val:w.payments.overheads,  cls:"text-orange-500" },
+                    ].map(cell => {
+                      const ck = `${w.wKey}_${cell.key}`;
+                      const isAct = editCell === ck;
+                      return (
+                        <td key={cell.key} onClick={() => { if(!isAct){ setEditCell(ck); setEditVal(String(cell.val)); }}}
+                          className={`px-3 py-2 text-right font-mono cursor-pointer ${cell.cls} ${isAct ? "bg-rose-50 ring-2 ring-inset ring-rose-400" : "hover:bg-rose-50/50"} ${cell.val === 0 ? "text-slate-300" : ""}`}>
+                          {isAct
+                            ? <input ref={inputRef} type="number" min="0" value={editVal} onChange={e=>setEditVal(e.target.value)}
+                                onBlur={() => commitEdit(w.wKey, cell.key, editVal)}
+                                onKeyDown={e => { if(e.key==="Enter"||e.key==="Tab"){e.preventDefault();commitEdit(w.wKey,cell.key,editVal);} else if(e.key==="Escape")setEditCell(null);}}
+                                className="w-full bg-transparent outline-none text-center text-xs font-bold"/>
+                            : cell.val > 0 ? fmtK(cell.val) : "—"}
+                        </td>
+                      );
+                    })}
+
+                    <td className="px-3 py-2 text-right font-bold font-mono text-rose-600 bg-rose-50/60">{fmtK(w.totalPayments)}</td>
+
+                    {/* One-off */}
+                    <td className="px-3 py-2 text-center">
+                      {addOneOff === w.wKey ? (
+                        <input type="number" autoFocus value={oneOffAmt} onChange={e=>setOneOffAmt(e.target.value)}
+                          onBlur={() => {
+                            const v = parseFloat(oneOffAmt);
+                            if (!isNaN(v)) setCashOverrides(prev => ({ ...prev, [`${w.wKey}_oneoff`]: Math.round(v) }));
+                            setAddOneOff(null); setOneOffAmt("");
+                          }}
+                          onKeyDown={e => { if(e.key==="Enter"){ const v=parseFloat(oneOffAmt); if(!isNaN(v)) setCashOverrides(prev=>({...prev,[`${w.wKey}_oneoff`]:Math.round(v)})); setAddOneOff(null); setOneOffAmt(""); } else if(e.key==="Escape") setAddOneOff(null);}}
+                          placeholder="±$" className="w-16 text-center border border-slate-300 rounded px-1 py-0.5 text-xs outline-none focus:ring-1 focus:ring-indigo-400"/>
+                      ) : w.oneOff !== 0 ? (
+                        <button onClick={() => { setAddOneOff(w.wKey); setOneOffAmt(String(w.oneOff)); }}
+                          className={`font-mono font-bold text-xs ${w.oneOff > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {w.oneOff > 0 ? "+" : ""}{fmtK(w.oneOff)}
+                        </button>
+                      ) : (
+                        <button onClick={() => setAddOneOff(w.wKey)}
+                          className="text-slate-300 hover:text-indigo-500 font-bold text-base leading-none">+</button>
+                      )}
+                    </td>
+
+                    <td className={`px-3 py-2 text-right font-bold font-mono ${w.net >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {w.net >= 0 ? "+" : ""}{fmtK(w.net)}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-black font-mono bg-indigo-50/60 ${balanceColor(w.closing)}`}>
+                      {fmtK(w.closing)}
+                      {isNeg && <span className="ml-1 text-[9px] bg-rose-500 text-white rounded px-1">DEFICIT</span>}
+                      {!isNeg && isLow && <span className="ml-1 text-[9px] bg-amber-400 text-white rounded px-1">LOW</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot className="bg-slate-100 border-t-2 border-slate-300">
+              <tr>
+                <td className="px-3 py-2.5 font-bold text-slate-700 sticky left-0 bg-slate-100">13-Week Total</td>
+                <td className="px-3 py-2.5 text-right font-mono font-semibold text-slate-600">{fmtK(startingBalance)}</td>
+                <td colSpan={4} className="px-3 py-2.5 text-right font-bold text-emerald-700 bg-emerald-50">{fmtK(totalIn)} inflows</td>
+                <td colSpan={5} className="px-3 py-2.5 text-right font-bold text-rose-600 bg-rose-50">{fmtK(totalOut)} outflows</td>
+                <td className="px-3 py-2.5"/>
+                <td className={`px-3 py-2.5 text-right font-bold font-mono ${(totalIn-totalOut)>=0?"text-emerald-600":"text-rose-600"}`}>
+                  {(totalIn-totalOut)>=0?"+":""}{fmtK(totalIn-totalOut)}
+                </td>
+                <td className={`px-3 py-2.5 text-right font-black font-mono bg-indigo-100 ${balanceColor(weeks[12]?.closing||0)}`}>
+                  {fmtK(weeks[12]?.closing||0)}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div className="px-4 py-2 bg-slate-50 border-t text-[10px] text-slate-400 flex gap-4">
+          <span><strong>Click</strong> any receipts or payments cell to override</span>
+          <span><strong>+</strong> button in One-off column to add irregular items (positive = receipt, negative = payment)</span>
+          <span className="text-amber-600">Amber = below $200k minimum · Red = cash deficit</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BUDGET VS ACTUALS P&L ────────────────────────────────────────────────────
+
+// Revenue actuals placeholder — in a real system these come from Xero
+// We use the model's operationalFinancials revenue for Jul-Feb as "actual revenue"
+const REVENUE_ACTUALS_FY26 = {
+  Jul: 682000, Aug: 712000, Sep: 698000, Oct: 741000,
+  Nov: 756000, Dec: 523000, Jan: 489000, Feb: 634000,
+};
+
+function BudgetActualsPnLView({ data, coaAdjustments }) {
+  const [activeFY,    setActiveFY]    = useState("FY26");
+  const [viewMode,    setViewMode]    = useState("monthly"); // monthly | ytd | full_year
+  const [expandedSections, setExpandedSections] = useState({ "Direct Costs": true, "Overheads": true });
+
+  const FY_LABELS = { FY26: "FY 2025–26", FY27: "FY 2026–27", FY28: "FY 2027–28" };
+  const ACTUAL_MKS = new Set(["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"]); // months with Xero actuals
+
+  const fyMonths = useMemo(() => MONTH_SCHEDULE.filter(m => m.fy === activeFY), [activeFY]);
+  const inflation = COST_INFLATION[activeFY] || 1;
+
+  // Get budget value for any CoA row + month
+  const getBudget = useCallback((account, mk) => {
+    const key = `${activeFY}|${account}|${mk}`;
+    if (coaAdjustments?.[key] !== undefined) return coaAdjustments[key];
+    const base = CHART_OF_ACCOUNTS.find(ac => ac.account === account)?.months[mk] || 0;
+    return Math.round(base * inflation);
+  }, [activeFY, coaAdjustments, inflation]);
+
+  // Get actual value for any CoA row + month (only available Jul–Feb FY26)
+  const getActual = useCallback((account, mk) => {
+    if (activeFY !== "FY26" || !ACTUAL_MKS.has(mk)) return null;
+    return ACTUALS_FY26[account]?.[mk] ?? null;
+  }, [activeFY]);
+
+  // Revenue: budget from model, actuals from REVENUE_ACTUALS_FY26
+  const getRevenueBudget = useCallback((mk) => {
+    const op = data.operationalFinancials.find(o => o.month === `${mk}-${activeFY === "FY26" ? (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"25":"26") : activeFY === "FY27" ? (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"26":"27") : (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"27":"28")}`);
+    return op?.revenue || 0;
+  }, [activeFY, data]);
+
+  const getRevenueActual = useCallback((mk) => {
+    if (activeFY !== "FY26" || !ACTUAL_MKS.has(mk)) return null;
+    return REVENUE_ACTUALS_FY26[mk] ?? null;
+  }, [activeFY]);
+
+  // P&L structure
+  const pnlSections = useMemo(() => [
+    {
+      id: "revenue",
+      label: "Revenue",
+      color: "text-blue-700",
+      bg: "bg-blue-50/50",
+      headerBg: "bg-blue-600",
+      sign: 1,
+      rows: [{ account: "Government Funded Revenue", isSynthetic: true, getB: getRevenueBudget, getA: getRevenueActual }],
+    },
+    {
+      id: "direct",
+      label: "Direct Costs",
+      color: "text-orange-700",
+      bg: "bg-orange-50/30",
+      headerBg: "bg-orange-500",
+      sign: -1,
+      rows: CHART_OF_ACCOUNTS.filter(ac => ac.section === "Direct Costs").map(ac => ({
+        account: ac.account, getB: (mk) => getBudget(ac.account, mk), getA: (mk) => getActual(ac.account, mk),
+      })),
+    },
+    {
+      id: "overheads",
+      label: "Overheads",
+      color: "text-rose-700",
+      bg: "bg-rose-50/20",
+      headerBg: "bg-rose-600",
+      sign: -1,
+      rows: CHART_OF_ACCOUNTS.filter(ac => ac.section === "Overheads").map(ac => ({
+        account: ac.account, getB: (mk) => getBudget(ac.account, mk), getA: (mk) => getActual(ac.account, mk),
+      })),
+    },
+  ], [getBudget, getActual, getRevenueBudget, getRevenueActual]);
+
+  // Compute totals per section per month
+  const computeSectionTotals = useCallback((section) => {
+    return fyMonths.map(({ mk }) => {
+      const budgetTotal  = section.rows.reduce((s, r) => s + (r.getB(mk) || 0), 0);
+      const actualMonths = section.rows.map(r => r.getA(mk)).filter(v => v !== null);
+      const actualTotal  = actualMonths.length > 0 ? actualMonths.reduce((s, v) => s + v, 0) : null;
+      return { mk, budgetTotal, actualTotal };
+    });
+  }, [fyMonths]);
+
+  // Derived P&L summaries
+  const revTotals  = useMemo(() => computeSectionTotals(pnlSections[0]), [pnlSections, computeSectionTotals]);
+  const dirTotals  = useMemo(() => computeSectionTotals(pnlSections[1]), [pnlSections, computeSectionTotals]);
+  const ovhTotals  = useMemo(() => computeSectionTotals(pnlSections[2]), [pnlSections, computeSectionTotals]);
+
+  const grossProfit  = useMemo(() => fyMonths.map(({ mk }, i) => ({
+    mk,
+    budget: (revTotals[i]?.budgetTotal || 0) - (dirTotals[i]?.budgetTotal || 0),
+    actual: (revTotals[i]?.actualTotal !== null && dirTotals[i]?.actualTotal !== null)
+      ? (revTotals[i].actualTotal - dirTotals[i].actualTotal) : null,
+  })), [fyMonths, revTotals, dirTotals]);
+
+  const ebitda = useMemo(() => fyMonths.map(({ mk }, i) => ({
+    mk,
+    budget: (revTotals[i]?.budgetTotal || 0) - (dirTotals[i]?.budgetTotal || 0) - (ovhTotals[i]?.budgetTotal || 0),
+    actual: (revTotals[i]?.actualTotal !== null && dirTotals[i]?.actualTotal !== null && ovhTotals[i]?.actualTotal !== null)
+      ? (revTotals[i].actualTotal - dirTotals[i].actualTotal - ovhTotals[i].actualTotal) : null,
+  })), [fyMonths, revTotals, dirTotals, ovhTotals]);
+
+  // YTD aggregates (actuals months only)
+  const ytdMks = activeFY === "FY26" ? fyMonths.filter(m => ACTUAL_MKS.has(m.mk)) : [];
+  const calcYTD = (getB, getA) => {
+    const budget = ytdMks.reduce((s, { mk }) => s + getB(mk), 0);
+    const actual = ytdMks.reduce((s, { mk }) => {
+      const a = getA(mk); return a !== null ? s + a : s;
+    }, 0);
+    return { budget, actual, variance: actual - budget, pct: budget !== 0 ? (actual - budget) / budget * 100 : 0 };
+  };
+
+  const chartData = useMemo(() => fyMonths.map(({ mk, label }, i) => ({
+    month: label,
+    revBudget:  revTotals[i]?.budgetTotal || 0,
+    revActual:  revTotals[i]?.actualTotal,
+    dirBudget:  dirTotals[i]?.budgetTotal || 0,
+    ovhBudget:  ovhTotals[i]?.budgetTotal || 0,
+    ebitdaBudget: ebitda[i]?.budget || 0,
+    ebitdaActual: ebitda[i]?.actual,
+  })), [fyMonths, revTotals, dirTotals, ovhTotals, ebitda]);
+
+  const fmtK     = v => v == null ? "—" : Math.abs(v) >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : `$${Math.round(v/1000)}k`;
+  const fmtFull  = v => v == null ? "—" : `$${Math.abs(Math.round(v)).toLocaleString()}`;
+  const varColor = (v, reverse=false) => {
+    if (v == null) return "text-slate-300";
+    const pos = reverse ? v < 0 : v > 0;
+    return pos ? "text-emerald-600" : v === 0 ? "text-slate-400" : "text-rose-600";
+  };
+  const varSign = v => v == null ? "" : v > 0 ? "+" : "";
+
+  // ── Totals row for FY columns ──────────────────────────────────────────────
+  const fyTotals = useMemo(() => ["FY26","FY27","FY28"].map(fy => {
+    const fym = MONTH_SCHEDULE.filter(m => m.fy === fy);
+    const infl = COST_INFLATION[fy] || 1;
+    const rev  = fym.reduce((s,{mk}) => { const op = data.operationalFinancials.find(o => o.month === `${mk}-${fym.find(m=>m.mk===mk)?.label?.slice(-2)}`); return s + (op?.revenue||0); }, 0);
+    const costs = CHART_OF_ACCOUNTS.reduce((s, ac) => s + fym.reduce((ss,{mk}) => ss + Math.round((ac.months[mk]||0)*infl), 0), 0);
+    return { fy, rev, costs, ebitda: rev - costs };
+  }), [data]);
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Header ── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+            <FileText size={20} className="text-rose-600"/>
+            Budget vs Actuals — P&L
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Actuals from Xero (Jul–Feb FY26) · Budget from Unit Modeler + Chart of Accounts · Variances show + = favourable
+          </p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          {["FY26","FY27","FY28"].map(fy => (
+            <button key={fy} onClick={() => setActiveFY(fy)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${activeFY===fy ? "bg-rose-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              {FY_LABELS[fy]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── 3-Year Summary Cards ── */}
+      <div className="grid grid-cols-3 gap-4">
+        {fyTotals.map(({ fy, rev, costs, ebitda: eb }) => (
+          <div key={fy} onClick={() => setActiveFY(fy)}
+            className={`rounded-xl border p-4 cursor-pointer transition-all ${activeFY===fy ? "border-rose-400 bg-rose-50 shadow-md" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+            <p className="text-xs font-bold text-slate-500 mb-2">{FY_LABELS[fy]}</p>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between"><span className="text-slate-500">Revenue Budget</span><span className="font-bold text-blue-700">{fmtK(rev)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Total Costs</span><span className="font-bold text-rose-600">{fmtK(costs)}</span></div>
+              <div className="flex justify-between border-t border-slate-200 pt-1 mt-1"><span className="font-bold text-slate-700">EBITDA</span><span className={`font-black ${eb > 0 ? "text-emerald-600" : "text-rose-600"}`}>{fmtK(eb)}</span></div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── EBITDA Chart ── */}
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <h3 className="text-sm font-bold text-slate-700 mb-1">Monthly P&L — {FY_LABELS[activeFY]}</h3>
+        <p className="text-[10px] text-slate-400 mb-4">Revenue vs total costs with EBITDA trend · Solid = budget, markers = actuals</p>
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={chartData} barSize={16}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+              <XAxis dataKey="month" fontSize={9} tickLine={false} axisLine={false}/>
+              <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={9} tickLine={false} axisLine={false}/>
+              <Tooltip formatter={(v, n) => [v != null ? fmtK(v) : "—", n]} contentStyle={{ borderRadius:"8px", border:"none", boxShadow:"0 4px 12px rgba(0,0,0,0.08)" }}/>
+              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize:10 }}/>
+              <Bar dataKey="revBudget"   name="Revenue (Budget)"    fill="#3b82f6" opacity={0.35} stackId={undefined}/>
+              <Bar dataKey="dirBudget"   name="Direct Costs"        fill="#f97316" opacity={0.45} stackId="costs"/>
+              <Bar dataKey="ovhBudget"   name="Overheads"           fill="#e11d48" opacity={0.45} stackId="costs" radius={[3,3,0,0]}/>
+              <Line type="monotone" dataKey="ebitdaBudget" name="EBITDA (Budget)"  stroke="#6366f1" strokeWidth={2} dot={false} strokeDasharray="5 3"/>
+              <Line type="monotone" dataKey="ebitdaActual" name="EBITDA (Actual)"  stroke="#059669" strokeWidth={2.5} dot={{ r:3, fill:"#059669" }}/>
+              <ReferenceLine y={0} stroke="#e11d48" strokeDasharray="3 3" strokeWidth={1}/>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* ── YTD Summary (FY26 only) ── */}
+      {activeFY === "FY26" && (
+        <div className="bg-white rounded-xl border border-slate-100 p-5">
+          <h3 className="text-sm font-bold text-slate-700 mb-3">YTD Summary — Jul–Feb 2026 (8 Months Actual)</h3>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {[
+              { label: "Revenue", ...calcYTD(getRevenueBudget, getRevenueActual), reverse: false },
+              { label: "Direct Costs", ...calcYTD(mk => dirTotals.find(d=>d.mk===mk)?.budgetTotal||0, mk => dirTotals.find(d=>d.mk===mk)?.actualTotal??null), reverse: true },
+              { label: "Overheads", ...calcYTD(mk => ovhTotals.find(d=>d.mk===mk)?.budgetTotal||0, mk => ovhTotals.find(d=>d.mk===mk)?.actualTotal??null), reverse: true },
+              { label: "EBITDA", ...calcYTD(mk => ebitda.find(d=>d.mk===mk)?.budget||0, mk => ebitda.find(d=>d.mk===mk)?.actual??null), reverse: false },
+            ].map(item => (
+              <div key={item.label} className="rounded-xl border border-slate-100 p-3">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-2">{item.label}</p>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between"><span className="text-slate-400">Budget</span><span className="font-mono font-semibold text-slate-700">{fmtK(item.budget)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-400">Actual</span><span className="font-mono font-bold text-slate-800">{fmtK(item.actual)}</span></div>
+                  <div className={`flex justify-between border-t border-slate-100 pt-1 ${varColor(item.variance, item.reverse)}`}>
+                    <span className="font-semibold">Variance</span>
+                    <span className="font-mono font-black">{varSign(item.variance)}{fmtK(item.variance)} ({varSign(item.pct)}{item.pct.toFixed(1)}%)</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Full P&L Table ── */}
+      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 bg-slate-800 text-white flex items-center justify-between">
+          <h3 className="text-sm font-bold">Detailed P&L — {FY_LABELS[activeFY]}</h3>
+          <span className="text-[10px] text-slate-400">B = Budget · A = Actual · Var = Actual minus Budget (+ = favourable)</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs border-collapse">
+            <thead className="bg-slate-50 border-b-2 border-slate-200">
+              <tr>
+                <th className="px-4 py-2.5 text-left font-semibold text-slate-500 sticky left-0 bg-slate-50 min-w-[200px]">Account</th>
+                {fyMonths.map(({ mk, label }) => (
+                  <th key={label} className="text-center font-semibold text-slate-500 min-w-[90px] border-l border-slate-100">
+                    <div className="px-1 py-1">{label}</div>
+                    {activeFY === "FY26" && ACTUAL_MKS.has(mk) && (
+                      <div className="grid grid-cols-3 border-t border-slate-200 text-[9px]">
+                        <span className="py-0.5 text-slate-400 border-r border-slate-200 px-1">B</span>
+                        <span className="py-0.5 text-emerald-600 font-bold border-r border-slate-200 px-1">A</span>
+                        <span className="py-0.5 text-indigo-500 font-bold px-1">Var</span>
+                      </div>
+                    )}
+                  </th>
+                ))}
+                <th className="px-3 py-2.5 text-right font-bold text-slate-600 bg-slate-100 min-w-[100px]">FY Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pnlSections.map((section) => {
+                const sTotals = computeSectionTotals(section);
+                const isExpanded = expandedSections[section.label] !== false;
+                const fyBudgetTotal = sTotals.reduce((s, t) => s + t.budgetTotal, 0);
+                const fyActualTotal = sTotals.filter(t => t.actualTotal !== null).reduce((s, t) => s + (t.actualTotal||0), 0);
+                return [
+                  /* Section header row */
+                  <tr key={`${section.id}_hdr`} className={`border-b border-slate-200 ${section.bg} cursor-pointer`}
+                    onClick={() => setExpandedSections(prev => ({ ...prev, [section.label]: !isExpanded }))}>
+                    <td className={`px-4 py-2 font-bold text-sm sticky left-0 bg-inherit ${section.color} flex items-center gap-2`}>
+                      <ChevronRight size={14} className={`transition-transform ${isExpanded ? "rotate-90" : ""}`}/>
+                      {section.label}
+                    </td>
+                    {sTotals.map(({ mk, budgetTotal, actualTotal }, ci) => {
+                      const hasActual = actualTotal !== null;
+                      const variance = hasActual ? (actualTotal - budgetTotal) * section.sign : null;
+                      return (
+                        <td key={mk} className="border-l border-slate-200">
+                          {hasActual && activeFY === "FY26" && ACTUAL_MKS.has(mk) ? (
+                            <div className="grid grid-cols-3 text-[10px]">
+                              <span className="text-right px-1 py-1 font-mono text-slate-500">{fmtK(budgetTotal)}</span>
+                              <span className="text-right px-1 py-1 font-mono font-bold text-slate-700">{fmtK(actualTotal)}</span>
+                              <span className={`text-right px-1 py-1 font-mono font-bold ${varColor(variance)}`}>{varSign(variance)}{fmtK(variance)}</span>
+                            </div>
+                          ) : (
+                            <div className="text-right px-2 py-1 font-mono font-semibold text-slate-600">{fmtK(budgetTotal)}</div>
+                          )}
+                        </td>
+                      );
+                    })}
+                    <td className={`px-3 py-2 text-right font-black font-mono ${section.color} bg-slate-50`}>{fmtK(fyBudgetTotal)}</td>
+                  </tr>,
+                  /* Detail rows */
+                  ...(isExpanded ? section.rows.map(row => {
+                    const rowMkData = fyMonths.map(({ mk }) => ({
+                      mk, budget: row.getB(mk), actual: row.getA(mk),
+                    }));
+                    const fyBudget = rowMkData.reduce((s, d) => s + d.budget, 0);
+                    return (
+                      <tr key={`${section.id}_${row.account}`} className="border-b border-slate-50 hover:bg-slate-50/60">
+                        <td className="px-4 py-1.5 text-slate-600 font-medium pl-8 sticky left-0 bg-inherit">{row.account}</td>
+                        {rowMkData.map(({ mk, budget, actual }) => {
+                          const hasActual = actual !== null;
+                          const variance = hasActual ? (actual - budget) * section.sign : null;
+                          return (
+                            <td key={mk} className="border-l border-slate-50">
+                              {hasActual && activeFY === "FY26" && ACTUAL_MKS.has(mk) ? (
+                                <div className="grid grid-cols-3 text-[9px]">
+                                  <span className="text-right px-1 py-1 font-mono text-slate-400">{fmtK(budget)}</span>
+                                  <span className="text-right px-1 py-1 font-mono font-semibold text-slate-600">{fmtK(actual)}</span>
+                                  <span className={`text-right px-1 py-1 font-mono ${varColor(variance)}`}>{varSign(variance)}{fmtK(variance)}</span>
+                                </div>
+                              ) : (
+                                <div className="text-right px-2 py-1 font-mono text-slate-400">{budget > 0 ? fmtK(budget) : "—"}</div>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td className="px-3 py-1.5 text-right font-semibold font-mono text-slate-600 bg-slate-50">{fyBudget > 0 ? fmtK(fyBudget) : "—"}</td>
+                      </tr>
+                    );
+                  }) : []),
+                  /* Subtotal spacer */
+                  <tr key={`${section.id}_spacer`} className="h-1 bg-slate-100"/>,
+                ];
+              })}
+
+              {/* Gross Profit row */}
+              <tr className="border-b border-emerald-200 bg-emerald-50/60">
+                <td className="px-4 py-2.5 font-black text-emerald-700 text-sm sticky left-0 bg-emerald-50/60">Gross Profit</td>
+                {grossProfit.map(({ mk, budget, actual }) => {
+                  const hasActual = actual !== null;
+                  const variance = hasActual ? actual - budget : null;
+                  const gpPct = budget !== 0 && revTotals.find(r=>r.mk===mk) ? Math.round(budget / (revTotals.find(r=>r.mk===mk)?.budgetTotal||1) * 100) : 0;
+                  return (
+                    <td key={mk} className="border-l border-emerald-100">
+                      {hasActual && activeFY === "FY26" && ACTUAL_MKS.has(mk) ? (
+                        <div className="grid grid-cols-3 text-[10px]">
+                          <span className="text-right px-1 py-1.5 font-mono font-bold text-emerald-600">{fmtK(budget)}</span>
+                          <span className="text-right px-1 py-1.5 font-mono font-black text-emerald-700">{fmtK(actual)}</span>
+                          <span className={`text-right px-1 py-1.5 font-mono font-bold ${varColor(variance)}`}>{varSign(variance)}{fmtK(variance)}</span>
+                        </div>
+                      ) : (
+                        <div className="text-right px-2 py-1.5 font-mono font-bold text-emerald-600">{fmtK(budget)}</div>
+                      )}
+                    </td>
+                  );
+                })}
+                <td className="px-3 py-2.5 text-right font-black text-emerald-700 bg-emerald-50">{fmtK(grossProfit.reduce((s,d)=>s+d.budget,0))}</td>
+              </tr>
+
+              {/* EBITDA row */}
+              <tr className="bg-indigo-50/60 border-t-2 border-indigo-200">
+                <td className="px-4 py-2.5 font-black text-indigo-700 text-sm sticky left-0 bg-indigo-50/60">EBITDA</td>
+                {ebitda.map(({ mk, budget, actual }) => {
+                  const hasActual = actual !== null;
+                  const variance = hasActual ? actual - budget : null;
+                  return (
+                    <td key={mk} className="border-l border-indigo-100">
+                      {hasActual && activeFY === "FY26" && ACTUAL_MKS.has(mk) ? (
+                        <div className="grid grid-cols-3 text-[10px]">
+                          <span className={`text-right px-1 py-2 font-mono font-bold ${budget>=0?"text-indigo-600":"text-rose-500"}`}>{fmtK(budget)}</span>
+                          <span className={`text-right px-1 py-2 font-mono font-black ${actual>=0?"text-indigo-700":"text-rose-600"}`}>{fmtK(actual)}</span>
+                          <span className={`text-right px-1 py-2 font-mono font-bold ${varColor(variance)}`}>{varSign(variance)}{fmtK(variance)}</span>
+                        </div>
+                      ) : (
+                        <div className={`text-right px-2 py-2 font-mono font-black ${budget>=0?"text-indigo-600":"text-rose-600"}`}>{fmtK(budget)}</div>
+                      )}
+                    </td>
+                  );
+                })}
+                <td className={`px-3 py-2.5 text-right font-black font-mono bg-indigo-100 ${ebitda.reduce((s,d)=>s+d.budget,0)>=0?"text-indigo-700":"text-rose-600"}`}>
+                  {fmtK(ebitda.reduce((s,d)=>s+d.budget,0))}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="px-4 py-2 bg-slate-50 border-t text-[10px] text-slate-400 flex gap-4">
+          <span><strong>B</strong> = Budget (model + CoA) · <strong>A</strong> = Xero Actuals (Jul–Feb) · <strong>Var</strong> = Actual minus Budget</span>
+          <span className="text-emerald-600">Green = favourable variance</span>
+          <span className="text-rose-500">Red = unfavourable variance</span>
+          <span>Click section header to expand/collapse</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── LAYOUT ───────────────────────────────────────────────────────────────────
 const NAV = [
   {id:"dashboard", label:"Overview",      icon:LayoutDashboard, group:"Analytics"},
   {id:"regions",   label:"Regions",       icon:PieChart,        group:"Analytics"},
   {id:"expenses",  label:"Expenses",      icon:CreditCard,      group:"Analytics"},
+  {id:"cashflow",   label:"Cash Flow",     icon:Wallet,          group:"Analytics"},
+  {id:"pnl",        label:"P&L vs Budget", icon:FileText,        group:"Analytics"},
   {id:"modeler",   label:"Unit Modeler",  icon:Edit,            group:"Planning"},
+  {id:"staffing",  label:"Staffing",      icon:Users,           group:"Planning"},
   {id:"staff",     label:"Staff Planner", icon:Users,           group:"Planning"},
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
   {id:"data",      label:"Raw Data",      icon:Table,           group:"Source"},
@@ -4472,6 +5831,7 @@ export default function App() {
   const [selectedYear, setSelectedYear] = useState("All");
   const [unitAdjustments, setUnitAdjustments] = useState({});
   const [coaAdjustments, setCoaAdjustments] = useState({});
+  const [peopleOverrides, setPeopleOverrides] = useState({});
   const [hiringEvents, setHiringEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -4539,6 +5899,8 @@ export default function App() {
           if(savedHires) setHiringEvents(JSON.parse(savedHires));
           const savedCoa = localStorage.getItem("coa_adjustments");
           if(savedCoa) setCoaAdjustments(JSON.parse(savedCoa));
+          const savedPeople = localStorage.getItem("people_overrides");
+          if(savedPeople) setPeopleOverrides(JSON.parse(savedPeople));
         } catch {}
       }
       setLoading(false);
@@ -4595,6 +5957,8 @@ export default function App() {
   };
 
   const handleUpdateCoa = (fy, account, mk, value) => {
+    const STAFFING_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
+    const isStaffingRow = STAFFING_ROWS.has(account);
     setCoaAdjustments(prev => {
       const key = `${fy}|${account}|${mk}`;
       const oldVal = prev[key];
@@ -4602,10 +5966,18 @@ export default function App() {
       if (value === -1) {
         const { [key]: _removed, ...rest } = prev;
         next = rest;
-        sbAudit(currentUser, "DELETE", "COA", `Reset ${account} · ${mk} (${fy})`, oldVal ?? null, null);
+        sbAudit(currentUser, "DELETE", "COA",
+          isStaffingRow
+            ? `⚡ STAFFING OVERRIDE RESET: ${account} · ${mk} (${fy}) — reverted to auto-calculated`
+            : `Reset ${account} · ${mk} (${fy})`,
+          oldVal ?? null, null);
       } else {
         next = { ...prev, [key]: value };
-        sbAudit(currentUser, "UPDATE", "COA", `${account} · ${mk} (${fy})`, oldVal ?? null, value);
+        sbAudit(currentUser, "UPDATE", "COA",
+          isStaffingRow
+            ? `⚡ STAFFING OVERRIDE: ${account} · ${mk} (${fy})`
+            : `${account} · ${mk} (${fy})`,
+          oldVal ?? null, value);
       }
       localStorage.setItem("coa_adjustments", JSON.stringify(next));
       return next;
@@ -4627,6 +5999,40 @@ export default function App() {
     } catch(e) {
       console.error("COA Supabase save failed, localStorage fallback used:", e);
     }
+    setSaving(false);
+  };
+
+  const handleUpdatePeople = (key, field, value) => {
+    setPeopleOverrides(prev => {
+      let next;
+      if (field === "__reset__") {
+        const { [key]: _removed, ...rest } = prev;
+        next = rest;
+        sbAudit(currentUser, "DELETE", "STAFFING", `Reset ${key} to default`);
+      } else if (field === "__add__") {
+        // value is full entry object
+        next = { ...prev, [key]: value };
+        sbAudit(currentUser, "UPDATE", "STAFFING", `Added role ${key}`, null, value.number);
+      } else {
+        const existing = prev[key] || {};
+        const basePerson = BUDGET_INPUTS.find(b => `${b.role}|${b.location}` === key) || {};
+        const oldVal = existing[field] ?? basePerson[field];
+        next = { ...prev, [key]: { ...(prev[key] || {}), [field]: value } };
+        sbAudit(currentUser, "UPDATE", "STAFFING", `${key} · ${field}`, oldVal ?? null, value);
+      }
+      localStorage.setItem("people_overrides", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const handleSavePeople = async () => {
+    setSaving(true);
+    try {
+      const rows = Object.entries(peopleOverrides).map(([key, val]) => ({ key, value: JSON.stringify(val) }));
+      localStorage.setItem("people_overrides", JSON.stringify(peopleOverrides));
+      if (rows.length > 0) await sbUpsert("people_overrides", rows);
+      await sbAudit(currentUser, "UPDATE", "STAFFING", `Saved staffing overrides (${rows.length} roles)`);
+    } catch(e) { console.error("People save failed:", e); }
     setSaving(false);
   };
 
@@ -4711,8 +6117,11 @@ export default function App() {
     >
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
+      {activeTab==="cashflow"  && <CashFlowForecastView data={data}/>}
+      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
+      {activeTab==="staffing"  && <StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents}/>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
