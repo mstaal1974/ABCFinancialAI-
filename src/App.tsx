@@ -103,6 +103,10 @@ async function sbUpsert(table, data) {
     headers: { ...getAuthHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
     body: JSON.stringify(data)
   });
+  if (!r.ok) {
+    const errBody = await r.text().catch(() => "(no body)");
+    console.error(`sbUpsert(${table}) HTTP ${r.status}:`, errBody);
+  }
   return r.ok;
 }
 
@@ -4486,18 +4490,36 @@ function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, h
   const people = useMemo(() => effectivePeople(peopleOverrides), [peopleOverrides]);
   const filledHires = useMemo(() => hiringEvents.filter(e => e.filled), [hiringEvents]);
 
-  // ── Group summaries ────────────────────────────────────────────────────────
+  // roleId → STAFFING_GROUPS id mapping
+  const ROLE_ID_TO_GROUP = { trainer:"trainers", sales:"sales", admin:"admin", manager:"management", snr_manager:"management", executive:"senior" };
+
+  // ── Group summaries (includes confirmed hires in headcount & cost) ─────────
   const groupStats = useMemo(() => {
     return STAFFING_GROUPS.map(g => {
       const members = people.filter(p => g.roles.includes(p.role));
-      const headcount = members.reduce((s, p) => s + p.number, 0);
-      const annualCost = members.reduce((s, p) => s + annualCostForEntry(p), 0);
+      const baseHeadcount = members.reduce((s, p) => s + p.number, 0);
+      const baseAnnualCost = members.reduce((s, p) => s + annualCostForEntry(p), 0);
+      // Confirmed hires belonging to this group
+      const confirmedHireRows = filledHires
+        .filter(ev => ev.eventType !== "departure" && ROLE_ID_TO_GROUP[ev.roleId] === g.id)
+        .map(ev => {
+          const role = STAFF_ROLES.find(r => r.id === ev.roleId);
+          const annualCost = role
+            ? ((role.baseWage + role.carAllowance + role.phoneAllowance) + role.baseWage * 0.12) * (1 + role.payrollTaxRate) * ev.count
+            : 0;
+          return { ...ev, role, annualCost };
+        });
+      const hireHeadcount = confirmedHireRows.reduce((s, r) => s + Number(r.count), 0);
+      const hireAnnualCost = confirmedHireRows.reduce((s, r) => s + r.annualCost, 0);
+      const headcount = baseHeadcount + hireHeadcount;
+      const annualCost = baseAnnualCost + hireAnnualCost;
       const avgSalary = headcount > 0
-        ? members.reduce((s, p) => s + p.base_salary * p.number, 0) / headcount
+        ? (members.reduce((s, p) => s + p.base_salary * p.number, 0) +
+           confirmedHireRows.reduce((s, r) => s + (r.role?.baseWage || 0) * Number(r.count), 0)) / headcount
         : 0;
-      return { ...g, headcount, annualCost, avgSalary, members };
+      return { ...g, headcount, annualCost, avgSalary, members, confirmedHireRows };
     });
-  }, [people]);
+  }, [people, filledHires]);
 
   const totalHeadcount = groupStats.reduce((s, g) => s + g.headcount, 0);
   const totalAnnualCost = groupStats.reduce((s, g) => s + g.annualCost, 0);
@@ -4827,16 +4849,37 @@ function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, h
                       </tr>
                     );
                   })}
+                  {/* Confirmed hire rows */}
+                  {g.confirmedHireRows && g.confirmedHireRows.map((ev, hi) => {
+                    const r = ev.role;
+                    if (!r) return null;
+                    const superAmt = r.baseWage * 0.12;
+                    const payrollAmt = (r.baseWage + r.carAllowance + r.phoneAllowance + superAmt) * r.payrollTaxRate;
+                    return (
+                      <tr key={"hire-"+hi} className="border-b border-emerald-100 bg-emerald-50/40">
+                        <td className="px-4 py-2 text-emerald-700 font-medium text-xs">
+                          <span className="inline-flex items-center gap-1">
+                            <span className="text-[9px] bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-bold">✓ HIRED</span>
+                            {r.label}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-slate-500 text-xs">{ev.region || "—"}</td>
+                        <td className="px-3 py-2 text-center font-bold text-emerald-700 font-mono text-xs">+{ev.count}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">${r.baseWage.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{r.carAllowance>0 ? `$${r.carAllowance.toLocaleString()}` : "—"}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{r.phoneAllowance>0 ? `$${r.phoneAllowance.toLocaleString()}` : "—"}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{fmtK(superAmt * ev.count)}</td>
+                        <td className="px-3 py-2 text-right text-slate-500 font-mono text-xs">{fmtK(payrollAmt * ev.count)}</td>
+                        <td className="px-4 py-2 text-right font-bold text-emerald-700 font-mono bg-emerald-50 text-xs">{fmtK(ev.annualCost)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot className="bg-slate-50 border-t-2 border-slate-200">
                   <tr>
                     <td colSpan={2} className="px-4 py-2 font-bold text-slate-600 text-xs">Group Total</td>
                     <td className="px-3 py-2 text-center font-black text-slate-800 text-xs">{g.headcount}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+p.base_salary*p.number,0))}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.car_allowance||0)*p.number,0))}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.phone_allowance||0)*p.number,0))}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+p.base_salary*0.12*p.number,0))}</td>
-                    <td className="px-3 py-2 text-right font-semibold text-slate-600 font-mono text-xs">{fmtK(g.members.reduce((s,p)=>s+(p.base_salary+p.car_allowance+p.phone_allowance+p.base_salary*0.12)*0.055*p.number,0))}</td>
+                    <td colSpan={4} className="px-3 py-2 text-slate-400 text-xs italic">{g.confirmedHireRows?.length > 0 ? `incl. ${g.confirmedHireRows.reduce((s,r)=>s+Number(r.count),0)} confirmed hire(s)` : ""}</td>
                     <td className="px-4 py-2 text-right font-black text-cyan-700 font-mono bg-slate-100 text-xs">{fmtK(g.annualCost)}</td>
                   </tr>
                 </tfoot>
@@ -6098,17 +6141,19 @@ export default function App() {
 
   const handleSaveHiring = async (events) => {
     setSaving(true);
+    const evList = events || hiringEvents;
+    // Always save to localStorage first so refresh never reverts
+    localStorage.setItem("staff_hiring_plan", JSON.stringify(evList));
     try {
-      const rows = (events||hiringEvents).map(ev => ({id:ev.id, role_id:ev.roleId, count:ev.count, start_month:ev.startMonth, region:ev.region, filled:!!ev.filled, event_type:ev.eventType||"hire"}));
+      const rows = evList.map(ev => ({id:ev.id, role_id:ev.roleId, count:Number(ev.count), start_month:ev.startMonth, region:ev.region, filled:ev.filled===true, event_type:ev.eventType||"hire"}));
       if (rows.length > 0) {
         const ok = await sbUpsert("hiring_plan", rows);
-        if (!ok) throw new Error("Supabase upsert returned failure — check hiring_plan table exists and RLS allows INSERT/UPDATE");
+        if (!ok) throw new Error("Supabase upsert failed — see browser console for HTTP error details");
       }
-      localStorage.setItem("staff_hiring_plan", JSON.stringify(events||hiringEvents));
       await sbAudit(currentUser, "UPDATE", "HIRE", `Saved hiring plan (${rows.length} events)`);
     } catch(e) {
       console.error("Save hiring failed:", e);
-      alert("⚠️ Save failed: " + e.message + "\n\nCheck browser console for details. You may need to create the hiring_plan table in Supabase.");
+      alert("⚠️ DB save failed: " + e.message + "\n\nChanges saved to browser storage — will persist until cache cleared.");
     }
     setSaving(false);
   };
