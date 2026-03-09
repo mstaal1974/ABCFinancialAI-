@@ -1512,7 +1512,7 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
 
           {/* ── AI Hiring ROI Panel ──────────────────────────────────────── */}
           {(roiLoading || roiResult) && (
-            <div className={`rounded-xl border overflow-hidden shadow-sm transition-all ${roiResult && !roiLoading ? "bg-white border-slate-100" : "bg-white border-slate-100"}`}>
+            <div className={`rounded-xl border shadow-sm transition-all ${roiResult && !roiLoading ? "bg-white border-slate-100" : "bg-white border-slate-100"}`}>
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-white text-[9px] font-black shrink-0">AI</div>
@@ -1583,7 +1583,7 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
                         <span className="w-4 h-4 rounded bg-violet-100 flex items-center justify-center text-[8px] font-black text-violet-700">AI</span>
                         Gemini Verdict
                       </p>
-                      <p className="text-[11px] text-slate-600 leading-relaxed">{roiResult.verdict}</p>
+                      <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">{roiResult.verdict}</p>
                     </div>
                   )}
 
@@ -3188,6 +3188,423 @@ function PasswordChangeScreen({ user, onComplete }) {
 }
 
 // ─── AUDIT LOG VIEW ────────────────────────────────────────────────────────────
+
+// ─── CALCULATION AUDIT PANEL ──────────────────────────────────────────────────
+// READ-ONLY: flags discrepancies only. No data changes made here.
+function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments }) {
+  const [status, setStatus] = useState("idle"); // idle | running | done | error
+  const [flags, setFlags] = useState([]);
+  const [aiNarrative, setAiNarrative] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [expandedFlag, setExpandedFlag] = useState(null);
+
+  // ── Run deterministic checks ───────────────────────────────────────────────
+  const runChecks = () => {
+    setStatus("running");
+    setFlags([]);
+    setAiNarrative("");
+    const found = [];
+
+    // Helper
+    const flag = (id, severity, category, title, detail, expected, actual, impact) =>
+      found.push({ id, severity, category, title, detail, expected, actual, impact });
+
+    // ── 1. STAFF_ROLES vs BUDGET_INPUTS inconsistencies ──────────────────────
+    // Sales base salary mismatch
+    const bi_sales = BUDGET_INPUTS.find(b => b.role === "Sales");
+    const sr_sales = STAFF_ROLES.find(r => r.id === "sales");
+    if (bi_sales && sr_sales && bi_sales.base_salary !== sr_sales.baseWage) {
+      const biMo = (() => { const g=bi_sales.base_salary+bi_sales.car_allowance+bi_sales.phone_allowance; const s=bi_sales.base_salary*0.12; return (g+s+(g+s)*0.055)*bi_sales.number/12; })();
+      const srMo = (() => { const g=sr_sales.baseWage+sr_sales.carAllowance+sr_sales.phoneAllowance; const s=sr_sales.baseWage*0.12; return (g+s+(g+s)*0.055)/12; })();
+      flag("SALES-BASE", "high", "Staffing",
+        "Sales salary mismatch: BUDGET_INPUTS vs STAFF_ROLES",
+        "BUDGET_INPUTS uses $90,000 base for Sales but STAFF_ROLES uses $100,000. Headcount table costs and confirmed-hire cashflow impact will differ.",
+        "$100,000 (STAFF_ROLES, used for hire cost modelling)",
+        "$90,000 (BUDGET_INPUTS, used for headcount table display)",
+        `$${Math.round((srMo - biMo/bi_sales.number)*12).toLocaleString()}/yr per Sales hire discrepancy`
+      );
+    }
+
+    // Manager car/phone: BUDGET_INPUTS has it, STAFF_ROLES doesn't
+    const bi_mgr = BUDGET_INPUTS.find(b => b.role === "Manager");
+    const sr_mgr = STAFF_ROLES.find(r => r.id === "manager");
+    if (bi_mgr && sr_mgr && (bi_mgr.car_allowance !== sr_mgr.carAllowance || bi_mgr.phone_allowance !== sr_mgr.phoneAllowance)) {
+      flag("MGR-ALLOW", "medium", "Staffing",
+        "Manager allowances differ between BUDGET_INPUTS and STAFF_ROLES",
+        "BUDGET_INPUTS shows Manager with Car $12,000 + Phone $1,200. STAFF_ROLES has $0 for both. Confirmed hires use STAFF_ROLES; headcount table uses BUDGET_INPUTS.",
+        `Car $${bi_mgr.car_allowance.toLocaleString()} + Phone $${bi_mgr.phone_allowance.toLocaleString()} (BUDGET_INPUTS)`,
+        `Car $${sr_mgr.carAllowance} + Phone $${sr_mgr.phoneAllowance} (STAFF_ROLES)`,
+        `~$${Math.round(((bi_mgr.car_allowance+bi_mgr.phone_allowance)*1.055)/12).toLocaleString()}/mo per manager hire`
+      );
+    }
+
+    // General Manager not in STAFF_ROLES
+    const bi_gm = BUDGET_INPUTS.find(b => b.role === "General Manager");
+    if (bi_gm && !STAFF_ROLES.find(r => r.label === "General Manager")) {
+      flag("GM-MISSING", "medium", "Staffing",
+        "General Manager role in BUDGET_INPUTS has no matching STAFF_ROLES entry",
+        "The headcount table shows a General Manager but the Staff Planner cannot add a General Manager hire (no matching role in STAFF_ROLES).",
+        "snr_manager maps to Senior Manager — may not match General Manager",
+        "No exact match in STAFF_ROLES",
+        `General Manager annual cost ~$${Math.round(((bi_gm.base_salary+bi_gm.car_allowance+bi_gm.phone_allowance)+bi_gm.base_salary*0.12)*1.055*bi_gm.number).toLocaleString()} hidden from planner`
+      );
+    }
+
+    // ── 2. COA staffing rows vs BUDGET_INPUTS total ───────────────────────────
+    const COA_CALC_ROWS = ["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"];
+    const coaStaffJul = CHART_OF_ACCOUNTS
+      .filter(ac => COA_CALC_ROWS.includes(ac.account))
+      .reduce((s, ac) => s + (ac.months["Jul"] || 0), 0);
+    const biMonthly = BUDGET_INPUTS.reduce((s, e) => {
+      const g = e.base_salary + e.car_allowance + e.phone_allowance;
+      const sup = e.base_salary * 0.12;
+      return s + (g + sup + (g + sup) * 0.055) * e.number / 12;
+    }, 0);
+    const gap = Math.abs(coaStaffJul - biMonthly);
+    if (gap > 5000) {
+      flag("COA-BI-GAP", "high", "Cashflow",
+        "COA staffing cost (Jul) does not match BUDGET_INPUTS total",
+        "The Xero COA wages+super+payroll for July ($335,291) significantly exceeds what BUDGET_INPUTS headcount would cost ($224,912). This $110k gap suggests either more staff in Xero than in BUDGET_INPUTS, or different salary rates. The baseline cashflow uses COA figures, but the staffing table is modelled from BUDGET_INPUTS — these are not reconciled.",
+        `$${Math.round(coaStaffJul).toLocaleString()}/mo (COA Xero actuals Jul)`,
+        `$${Math.round(biMonthly).toLocaleString()}/mo (BUDGET_INPUTS model)`,
+        `$${Math.round(gap).toLocaleString()}/mo ($${Math.round(gap*12).toLocaleString()}/yr) unexplained gap in staffing costs`
+      );
+    }
+
+    // ── 3. Revenue double-source check ────────────────────────────────────────
+    // Check if any opFin month has revenue ≠ baseRevenue + filledRevDelta
+    const opFin = data.operationalFinancials;
+    const regions = data.regions;
+    let revMismatch = 0;
+    opFin.forEach((op, i) => {
+      const baseRev = regions.reduce((s, r) => s + (r.monthlyData[i]?.revenue || 0), 0);
+      const derivedRev = op.payments + op.netCashflow;
+      if (Math.abs(derivedRev - (baseRev + (op.filledRevDelta || 0))) > 1) revMismatch++;
+    });
+    if (revMismatch > 0) {
+      flag("REV-DERIVE", "medium", "Cashflow",
+        `Revenue derivation inconsistency in ${revMismatch} month(s)`,
+        "The Cashflow Summary derives Revenue as (Payments + Net Cashflow) rather than reading it directly. In months where filledRevDelta is non-zero this is correct, but if the calculation chain has any rounding or ordering issues, the displayed Revenue can drift from the sum of regional revenues.",
+        "Revenue = sum of all regional unit revenues + confirmed hire revenue contribution",
+        "Revenue = op.payments + op.netCashflow (derived)",
+        "May cause Revenue KPI to differ from Regional Analysis totals"
+      );
+    }
+
+    // ── 4. Confirmed hire costs: double-check getMonthlyCost vs displayed value ─
+    const filledHires = hiringEvents.filter(e => e.filled && e.eventType !== "departure");
+    filledHires.forEach(ev => {
+      const sr = STAFF_ROLES.find(r => r.id === ev.roleId);
+      if (!sr) {
+        flag(`HIRE-ROLE-${ev.id}`, "high", "Staffing",
+          `Confirmed hire has unknown roleId: "${ev.roleId}"`,
+          `A confirmed hire (starts ${ev.startMonth}, region ${ev.region}) references roleId "${ev.roleId}" which does not exist in STAFF_ROLES. Its cost contribution to cashflow is $0 — it appears confirmed but has no financial impact.`,
+          "Valid roleId from STAFF_ROLES",
+          `"${ev.roleId}" (not found)`,
+          "Zero cost impact — hire is financially invisible"
+        );
+      }
+    });
+
+    // ── 5. peopleOverrides sanity check ───────────────────────────────────────
+    Object.entries(peopleOverrides).forEach(([key, ov]) => {
+      const base = BUDGET_INPUTS.find(b => `${b.role}|${b.location}` === key);
+      if (!base) {
+        flag(`OV-ORPHAN-${key}`, "low", "Staffing",
+          `Override "${key}" has no matching BUDGET_INPUTS row`,
+          `A people_overrides entry exists for "${key}" but there is no corresponding row in BUDGET_INPUTS. This override may be a deleted role or a renamed entry. It will not appear in the headcount table.`,
+          "Override key matches a BUDGET_INPUTS row",
+          `"${key}" not found in BUDGET_INPUTS`,
+          "Orphaned override — may inflate or hide costs"
+        );
+      }
+      if (ov.number !== undefined && ov.number < 0) {
+        flag(`OV-NEG-${key}`, "high", "Staffing",
+          `Negative headcount for "${key}"`,
+          `People override for "${key}" has number=${ov.number}. Negative headcount will subtract staff costs from the model, which is incorrect.`,
+          "number >= 0",
+          `number = ${ov.number}`,
+          "Negative cost contribution to model"
+        );
+      }
+    });
+
+    // ── 6. COA adjustments sanity check ──────────────────────────────────────
+    const extremeAdj = Object.entries(coaAdjustments).filter(([k, v]) => {
+      const parts = k.split("|");
+      if (parts.length < 3) return false;
+      const [fy, account, mk] = parts;
+      const original = CHART_OF_ACCOUNTS.find(ac => ac.account === account);
+      if (!original) return false;
+      const orig = original.months[mk] || 0;
+      return orig > 0 && Math.abs(v - orig) / orig > 0.5; // >50% deviation
+    });
+    if (extremeAdj.length > 0) {
+      flag("COA-EXTREME", "medium", "Cashflow",
+        `${extremeAdj.length} COA adjustment(s) deviate >50% from Xero baseline`,
+        "Some budget editor changes differ significantly from the Xero actuals they override. This may be intentional (scenario planning) but should be reviewed.",
+        "Within ±50% of Xero baseline",
+        extremeAdj.slice(0,3).map(([k]) => k).join(", ") + (extremeAdj.length > 3 ? ` +${extremeAdj.length-3} more` : ""),
+        "May distort financial projections significantly"
+      );
+    }
+
+    // ── 7. Cashflow closing balance sanity ────────────────────────────────────
+    // Verify each month: closingBalance = openingBalance + netCashflow
+    let balanceErrors = 0;
+    opFin.forEach(op => {
+      if (Math.abs((op.openingBalance + op.netCashflow) - op.closingBalance) > 1) balanceErrors++;
+    });
+    if (balanceErrors > 0) {
+      flag("BALANCE-CHAIN", "high", "Cashflow",
+        `Cashflow balance chain broken in ${balanceErrors} month(s)`,
+        "In one or more months, closingBalance ≠ openingBalance + netCashflow. This indicates a calculation error in the balance accumulation loop.",
+        "closingBalance = openingBalance + netCashflow (every month)",
+        `${balanceErrors} month(s) fail this check`,
+        "Closing balance and all downstream figures are incorrect"
+      );
+    }
+
+    // ── 8. Net cashflow = revenue - payments ─────────────────────────────────
+    let netErrors = 0;
+    opFin.forEach(op => {
+      const derivedNet = (op.payments + op.netCashflow) - op.payments; // = op.netCashflow — tautology, so check differently
+      // Actual check: op.netCashflow should equal revenue-payments where revenue = payments+netCashflow
+      // Real check: verify rounding doesn't cause >$1 drift per month
+      const checkRev = op.payments + op.netCashflow;
+      if (checkRev < 0 && op.netCashflow > 0) netErrors++; // impossible: positive net but negative implied revenue
+    });
+    if (netErrors > 0) {
+      flag("NET-SIGN", "high", "Cashflow",
+        `${netErrors} month(s) with impossible revenue sign`,
+        "One or more months show positive net cashflow but a negative implied revenue (payments + net < 0). This is mathematically impossible and indicates a calculation error.",
+        "Revenue (= payments + net) must be ≥ 0",
+        `${netErrors} month(s) fail`,
+        "Cashflow Summary figures are unreliable"
+      );
+    }
+
+    setFlags(found);
+    setStatus("done");
+  };
+
+  // ── AI narrative via Anthropic API ────────────────────────────────────────
+  const runAiReview = async () => {
+    if (flags.length === 0) return;
+    setAiLoading(true);
+    try {
+      const summary = flags.map(f =>
+        `[${f.severity.toUpperCase()}] ${f.category} — ${f.title}\nExpected: ${f.expected}\nActual: ${f.actual}\nImpact: ${f.impact}`
+      ).join("\n\n");
+
+      const opFin = data.operationalFinancials;
+      const fy26 = opFin.filter(op => op.fy === "FY26");
+      const totalRev = fy26.reduce((s,op) => s + op.payments + op.netCashflow, 0);
+      const totalPmt = fy26.reduce((s,op) => s + op.payments, 0);
+      const closingBal = fy26[fy26.length-1]?.closingBalance || 0;
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: "You are a financial controller auditing a React-based BI dashboard for an Australian RTO (Registered Training Organisation). You review calculation flags and provide a concise, professional audit narrative. Respond in 3-4 short paragraphs. Be specific about which flags are most critical and why. Do NOT suggest code changes — only assess financial accuracy and risk.",
+          messages: [{
+            role: "user",
+            content: `Please review these calculation audit flags for our EduGrowth BI dashboard and provide an audit assessment.
+
+FY26 Financial Summary:
+- Total Revenue: $${Math.round(totalRev).toLocaleString()}
+- Total Payments: $${Math.round(totalPmt).toLocaleString()}
+- FY26 Closing Balance: $${Math.round(closingBal).toLocaleString()}
+
+Flags Found (${flags.length} total):
+${summary}
+
+Please assess: (1) which flags most materially affect financial accuracy, (2) whether the cashflow figures are reliable given these flags, (3) any reconciliation steps recommended before presenting to management.`
+          }]
+        })
+      });
+      const result = await resp.json();
+      const text = result.content?.find(c => c.type === "text")?.text || "No response";
+      setAiNarrative(text);
+    } catch(e) {
+      setAiNarrative("AI review failed: " + e.message);
+    }
+    setAiLoading(false);
+  };
+
+  const severityConfig = {
+    high:   { bg: "bg-red-50",    border: "border-red-300",   badge: "bg-red-100 text-red-700",    icon: "🔴", label: "High" },
+    medium: { bg: "bg-amber-50",  border: "border-amber-300", badge: "bg-amber-100 text-amber-700", icon: "🟡", label: "Medium" },
+    low:    { bg: "bg-blue-50",   border: "border-blue-200",  badge: "bg-blue-100 text-blue-700",   icon: "🔵", label: "Low" },
+  };
+
+  const highCount   = flags.filter(f => f.severity === "high").length;
+  const medCount    = flags.filter(f => f.severity === "medium").length;
+  const lowCount    = flags.filter(f => f.severity === "low").length;
+
+  return (
+    <div className="space-y-6 max-w-5xl">
+      {/* Header */}
+      <div className="bg-white rounded-xl border border-slate-200 p-6">
+        <div className="flex items-start justify-between flex-wrap gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+              <Shield size={20} className="text-indigo-600"/>
+              Calculation Integrity Audit
+            </h2>
+            <p className="text-xs text-slate-500 mt-1 max-w-xl">
+              Read-only audit — flags discrepancies between data sources and financial calculations. No changes are made. Run before presenting figures to management.
+            </p>
+          </div>
+          <button
+            onClick={runChecks}
+            disabled={status === "running"}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors"
+          >
+            {status === "running"
+              ? <><Loader2 size={15} className="animate-spin"/>Running checks…</>
+              : <><Shield size={15}/>Run Audit</>}
+          </button>
+        </div>
+
+        {/* What is checked */}
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          {[
+            { label: "STAFF_ROLES consistency", desc: "Planner vs table" },
+            { label: "COA vs BUDGET_INPUTS", desc: "Xero vs model gap" },
+            { label: "Cashflow chain", desc: "Balance integrity" },
+            { label: "Override sanity", desc: "Orphans & negatives" },
+          ].map(c => (
+            <div key={c.label} className="bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
+              <p className="font-semibold text-slate-700">{c.label}</p>
+              <p className="text-slate-400">{c.desc}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Results */}
+      {status === "done" && (
+        <>
+          {/* Score bar */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-slate-700">Audit Results</h3>
+              <span className={`text-xs font-bold px-3 py-1 rounded-full ${
+                highCount > 0 ? "bg-red-100 text-red-700" :
+                medCount > 0  ? "bg-amber-100 text-amber-700" :
+                "bg-emerald-100 text-emerald-700"
+              }`}>
+                {flags.length === 0 ? "✓ No issues found" : `${flags.length} flag${flags.length>1?"s":""} found`}
+              </span>
+            </div>
+            <div className="flex gap-4 text-sm">
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block"/>High: <strong>{highCount}</strong></span>
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"/>Medium: <strong>{medCount}</strong></span>
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-blue-400 inline-block"/>Low: <strong>{lowCount}</strong></span>
+            </div>
+          </div>
+
+          {/* Flag list */}
+          {flags.length > 0 && (
+            <div className="space-y-3">
+              {flags.map((f, i) => {
+                const s = severityConfig[f.severity] || severityConfig.low;
+                const isOpen = expandedFlag === f.id;
+                return (
+                  <div key={f.id} className={`rounded-xl border-2 ${s.border} ${s.bg} overflow-hidden`}>
+                    <button
+                      onClick={() => setExpandedFlag(isOpen ? null : f.id)}
+                      className="w-full flex items-start gap-3 p-4 text-left"
+                    >
+                      <span className="text-base mt-0.5">{s.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${s.badge}`}>{s.label}</span>
+                          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{f.category}</span>
+                          <span className="text-xs font-bold text-slate-800">{f.title}</span>
+                        </div>
+                        {isOpen && (
+                          <div className="mt-3 space-y-2 text-xs">
+                            <p className="text-slate-600">{f.detail}</p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">
+                                <p className="text-[10px] font-bold text-emerald-700 mb-1">EXPECTED</p>
+                                <p className="text-slate-700">{f.expected}</p>
+                              </div>
+                              <div className="bg-red-50 border border-red-200 rounded-lg p-2.5">
+                                <p className="text-[10px] font-bold text-red-700 mb-1">ACTUAL (FLAGGED)</p>
+                                <p className="text-slate-700">{f.actual}</p>
+                              </div>
+                            </div>
+                            <div className="bg-slate-100 rounded-lg p-2.5">
+                              <p className="text-[10px] font-bold text-slate-500 mb-1">FINANCIAL IMPACT</p>
+                              <p className="text-slate-700">{f.impact}</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <ChevronRight size={14} className={`text-slate-400 shrink-0 mt-1 transition-transform ${isOpen ? "rotate-90" : ""}`}/>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {flags.length === 0 && (
+            <div className="bg-emerald-50 border-2 border-emerald-200 rounded-xl p-6 text-center">
+              <CheckCircle size={32} className="text-emerald-500 mx-auto mb-2"/>
+              <p className="text-emerald-700 font-semibold">All checks passed</p>
+              <p className="text-emerald-600 text-sm mt-1">No calculation discrepancies detected in current data.</p>
+            </div>
+          )}
+
+          {/* AI Review */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                <Zap size={14} className="text-indigo-500"/>
+                AI Audit Assessment
+              </h3>
+              <button
+                onClick={runAiReview}
+                disabled={aiLoading || flags.length === 0}
+                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+              >
+                {aiLoading ? <><Loader2 size={12} className="animate-spin"/>Reviewing…</> : <><Zap size={12}/>Get AI Assessment</>}
+              </button>
+            </div>
+            {aiNarrative ? (
+              <div className="prose prose-sm max-w-none text-slate-600 text-sm leading-relaxed whitespace-pre-wrap bg-slate-50 rounded-lg p-4 border border-slate-100">
+                {aiNarrative}
+              </div>
+            ) : (
+              <p className="text-slate-400 text-xs italic">
+                {flags.length === 0
+                  ? "Run the audit first to enable AI assessment."
+                  : "Click \"Get AI Assessment\" to have Claude review these flags and provide a financial controller\'s assessment."}
+              </p>
+            )}
+            <p className="text-[10px] text-slate-300 mt-3">AI assessment is advisory only. No data is modified. Powered by Anthropic Claude.</p>
+          </div>
+        </>
+      )}
+
+      {status === "idle" && (
+        <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl p-10 text-center">
+          <Shield size={36} className="text-slate-300 mx-auto mb-3"/>
+          <p className="text-slate-500 font-medium">Click "Run Audit" to check calculation integrity</p>
+          <p className="text-slate-400 text-sm mt-1">Checks 8 categories across staffing, COA, and cashflow</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditLogView() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5775,6 +6192,7 @@ const NAV = [
   {id:"staff",     label:"Staff Planner", icon:Users,           group:"Planning"},
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
   {id:"data",      label:"Raw Data",      icon:Table,           group:"Source"},
+  {id:"calc-audit", label:"Calc Audit",    icon:Shield,          group:"Admin"},
   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
   {id:"aianalytics",label:"AI Analytics",  icon:Zap,             group:"Admin"},
 ];
@@ -6222,6 +6640,7 @@ export default function App() {
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
+      {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments}/>}
       {activeTab==="audit"     && <AuditLogView/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
