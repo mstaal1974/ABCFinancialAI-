@@ -446,7 +446,7 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
   const _defaultMonthlyStaff = BUDGET_INPUTS.reduce((s, e) => s + monthlyCostForEntry(e), 0);
   const _effectiveMonthlyStaff = effectivePeople(peopleOverrides).reduce((s, e) => s + monthlyCostForEntry(e), 0);
   const _staffDeltaPerMonth = _effectiveMonthlyStaff - _defaultMonthlyStaff;
-  console.log("[buildBaseline] peopleOverrides keys:", Object.keys(peopleOverrides), "staffDelta/mo:", Math.round(_staffDeltaPerMonth));
+  console.log("[buildBaseline] filledHires:", filledHires.length, "| peopleOverrides keys:", Object.keys(peopleOverrides).length, "| staffDelta/mo:", Math.round(_staffDeltaPerMonth));
 
   let balance = 850000;
   const CALC_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
@@ -553,6 +553,7 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], anom
   const filtered = useMemo(() => {
     let totalRevenue=0,totalUnits=0,totalBudget=0,totalPayments=0,totalNetCashflow=0,currentCash=0;
     const regionStats = [];
+    // Build per-region unit/budget stats (base only — for breakdown display)
     regions.forEach(r => {
       let rRev=0,rUnits=0,rBudget=0;
       r.monthlyData.forEach(md => {
@@ -561,13 +562,17 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], anom
           rRev+=md.revenue; rUnits+=md.units; rBudget+=md.budget;
         }
       });
-      totalRevenue+=rRev; totalUnits+=rUnits; totalBudget+=rBudget;
+      totalUnits+=rUnits; totalBudget+=rBudget;
       regionStats.push({region:r.region, totalRevenue:rRev, totalUnits:rUnits, totalBudget:rBudget});
     });
+    // Revenue, Payments, and NetCashflow come from operationalFinancials so confirmed hires are included
     let lastDate=null;
     operationalFinancials.forEach(op => {
       if (isMonthInPeriod(op.dateObj, yearBasis, selectedYear)) {
+        // op.netCashflow = (baseRevenue + filledRevDelta) - (baseCosts + filledStaffCostDelta)
+        // Revenue = payments + net  (avoids double-deriving)
         totalPayments+=op.payments; totalNetCashflow+=op.netCashflow;
+        totalRevenue+=(op.payments + op.netCashflow); // = actual revenue this month
         if (!lastDate || op.dateObj>lastDate) {lastDate=op.dateObj; currentCash=op.closingBalance;}
       }
     });
