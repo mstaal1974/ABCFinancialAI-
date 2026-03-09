@@ -438,12 +438,16 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
   })).filter(ev => ev.si !== -1);
 
   // Build operational financials — filled hires baked into actuals
+  // Pre-compute headcount delta ONCE outside the loop so peopleOverrides change triggers recalc
+  const _defaultMonthlyStaff = BUDGET_INPUTS.reduce((s, e) => s + monthlyCostForEntry(e), 0);
+  const _effectiveMonthlyStaff = effectivePeople(peopleOverrides).reduce((s, e) => s + monthlyCostForEntry(e), 0);
+  const _staffDeltaPerMonth = _effectiveMonthlyStaff - _defaultMonthlyStaff;
+  console.log("[buildBaseline] peopleOverrides keys:", Object.keys(peopleOverrides), "staffDelta/mo:", Math.round(_staffDeltaPerMonth));
+
   let balance = 850000;
+  const CALC_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
   const opFin = MONTH_SCHEDULE.map(({ label, mk, fy }, i) => {
     const inflation = COST_INFLATION[fy] || 1;
-    // Use coaAdjustments override if present, else COA default * inflation
-    // Calculated rows (Gross Wages, Super, Payroll Tax) are NOT in COA for calc purposes — they come from staffing
-    const CALC_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
     let pmt = Math.round(CHART_OF_ACCOUNTS
       .filter(ac => !CALC_ROWS.has(ac.account))
       .reduce((s, ac) => {
@@ -451,10 +455,12 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
         const v = coaAdjustments[key] !== undefined ? coaAdjustments[key] : Math.round((ac.months[mk] || 0) * inflation);
         return s + v;
       }, 0));
-    // Add staffing rows: compute from effectivePeople(peopleOverrides) so manual headcount changes flow through
-    const effectiveStaff = effectivePeople(peopleOverrides);
-    const totalMonthlyStaffCost = effectiveStaff.reduce((s, e) => s + monthlyCostForEntry(e), 0);
-    pmt += Math.round(totalMonthlyStaffCost);
+    // Add staffing: COA actuals as baseline + delta from peopleOverrides changes
+    // Preserves Xero-accurate costs while reflecting manual headcount edits
+    const staffBase = CHART_OF_ACCOUNTS
+      .filter(ac => CALC_ROWS.has(ac.account))
+      .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
+    pmt += staffBase + Math.round(_staffDeltaPerMonth * inflation);
     const baseRevenue = regions.reduce((s, r) => s + (r.monthlyData[i]?.revenue || 0), 0);
 
     // Filled events: confirmed hires add cost+revenue, confirmed departures remove both
@@ -6040,9 +6046,16 @@ export default function App() {
       localStorage.setItem("people_overrides", JSON.stringify(next));
       // Auto-save to Supabase immediately so refresh doesn't revert
       const rows = Object.entries(next).map(([k, val]) => ({ key: k, value: JSON.stringify(val) }));
-      if (rows.length > 0) sbUpsert("people_overrides", rows).then(ok => {
-        if (!ok) console.error("people_overrides auto-save failed — check table exists and RLS policies");
-      });
+      if (rows.length > 0) {
+        sbUpsert("people_overrides", rows).then(ok => {
+          if (!ok) console.error("people_overrides auto-save failed");
+        });
+      }
+      if (field === "__reset__") {
+        sbDelete("people_overrides", { key }).then(ok => {
+          if (!ok) console.error("people_overrides delete failed for key:", key);
+        });
+      }
       return next;
     });
   };
