@@ -389,7 +389,7 @@ function _regionAvgUnitValue(region) {
   return prices.length ? prices.reduce((s,p)=>s+p,0)/prices.length : 0;
 }
 
-function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}) {
+function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}, peopleOverrides = {}) {
   // Build unit data across all 36 months
   const units = [];
   Object.entries(UNIT_ASSUMPTIONS_FY26).forEach(([region, courses]) => {
@@ -451,11 +451,10 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
         const v = coaAdjustments[key] !== undefined ? coaAdjustments[key] : Math.round((ac.months[mk] || 0) * inflation);
         return s + v;
       }, 0));
-    // Add staffing rows: baseline BUDGET_INPUTS wages/super/payrolltax with inflation
-    const staffBase = CHART_OF_ACCOUNTS
-      .filter(ac => CALC_ROWS.has(ac.account))
-      .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
-    pmt += staffBase;
+    // Add staffing rows: compute from effectivePeople(peopleOverrides) so manual headcount changes flow through
+    const effectiveStaff = effectivePeople(peopleOverrides);
+    const totalMonthlyStaffCost = effectiveStaff.reduce((s, e) => s + monthlyCostForEntry(e), 0);
+    pmt += Math.round(totalMonthlyStaffCost);
     const baseRevenue = regions.reduce((s, r) => s + (r.monthlyData[i]?.revenue || 0), 0);
 
     // Filled events: confirmed hires add cost+revenue, confirmed departures remove both
@@ -5896,6 +5895,17 @@ export default function App() {
           const savedCoa = localStorage.getItem("coa_adjustments");
           if (savedCoa) setCoaAdjustments(JSON.parse(savedCoa));
         }
+
+        const peopleData = await sbGet("people_overrides");
+        if (peopleData && Array.isArray(peopleData) && peopleData.length > 0) {
+          const ppl = {};
+          peopleData.forEach(row => { if(row.key && row.value!==null) { try { ppl[row.key] = JSON.parse(row.value); } catch {} } });
+          setPeopleOverrides(ppl);
+          console.log(`✓ Loaded ${peopleData.length} people overrides from Supabase`);
+        } else {
+          const savedPeople = localStorage.getItem("people_overrides");
+          if (savedPeople) { try { setPeopleOverrides(JSON.parse(savedPeople)); } catch {} }
+        }
         setSupaStatus("connected");
       } catch(e) {
         console.warn("Supabase load failed, using localStorage fallback:", e);
@@ -5918,7 +5928,7 @@ export default function App() {
 
   // Filled hires are treated as committed — they feed into the true cost/revenue position
   const filledHires = useMemo(() => hiringEvents.filter(ev => ev.filled), [hiringEvents]);
-  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments), [unitAdjustments, filledHires, coaAdjustments]);
+  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides]);
 
   const availableYears = useMemo(() => {
     const s = new Set();
@@ -6018,7 +6028,6 @@ export default function App() {
         next = rest;
         sbAudit(currentUser, "DELETE", "STAFFING", `Reset ${key} to default`);
       } else if (field === "__add__") {
-        // value is full entry object
         next = { ...prev, [key]: value };
         sbAudit(currentUser, "UPDATE", "STAFFING", `Added role ${key}`, null, value.number);
       } else {
@@ -6029,6 +6038,11 @@ export default function App() {
         sbAudit(currentUser, "UPDATE", "STAFFING", `${key} · ${field}`, oldVal ?? null, value);
       }
       localStorage.setItem("people_overrides", JSON.stringify(next));
+      // Auto-save to Supabase immediately so refresh doesn't revert
+      const rows = Object.entries(next).map(([k, val]) => ({ key: k, value: JSON.stringify(val) }));
+      if (rows.length > 0) sbUpsert("people_overrides", rows).then(ok => {
+        if (!ok) console.error("people_overrides auto-save failed — check table exists and RLS policies");
+      });
       return next;
     });
   };
@@ -6038,9 +6052,15 @@ export default function App() {
     try {
       const rows = Object.entries(peopleOverrides).map(([key, val]) => ({ key, value: JSON.stringify(val) }));
       localStorage.setItem("people_overrides", JSON.stringify(peopleOverrides));
-      if (rows.length > 0) await sbUpsert("people_overrides", rows);
+      if (rows.length > 0) {
+        const ok = await sbUpsert("people_overrides", rows);
+        if (!ok) throw new Error("Supabase upsert returned failure — check people_overrides table exists and RLS allows INSERT/UPDATE");
+      }
       await sbAudit(currentUser, "UPDATE", "STAFFING", `Saved staffing overrides (${rows.length} roles)`);
-    } catch(e) { console.error("People save failed:", e); }
+    } catch(e) {
+      console.error("People save failed:", e);
+      alert("⚠️ Save failed: " + e.message + "\n\nYou may need to create the people_overrides table in Supabase.");
+    }
     setSaving(false);
   };
 
