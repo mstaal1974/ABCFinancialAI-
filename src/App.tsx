@@ -6751,7 +6751,7 @@ export default function App() {
 
   // Filled hires are treated as committed — they feed into the true cost/revenue position
   const filledHires = useMemo(() => hiringEvents.filter(ev => ev.filled), [hiringEvents]);
-  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, wageSettings]);
+  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage]);
 
   const availableYears = useMemo(() => {
     const s = new Set();
