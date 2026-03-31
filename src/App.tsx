@@ -554,7 +554,7 @@ function StatsCard({title, value, trend, icon: Icon, color}) {
 }
 
 // ─── DASHBOARD OVERVIEW ───────────────────────────────────────────────────────
-function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], anomalies=[], anomalyStatus="idle", lastScanned=null, onShowAnomalies}) {
+function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], appliedWage={}, anomalies=[], anomalyStatus="idle", lastScanned=null, onShowAnomalies}) {
   const {regions, units, operationalFinancials} = data;
 
   const filtered = useMemo(() => {
@@ -653,17 +653,25 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], anom
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-100">
-          <div className="flex items-center justify-between mb-5">
+          <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
             <h3 className="text-base font-bold text-slate-800">Financial Performance</h3>
-            {plannedHires.length > 0 && (
-              <span className="flex items-center gap-1.5 text-[10px] text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
-                <span className="inline-block w-4 border-t-2 border-dashed border-emerald-500"/>
-                {[
-                  plannedHires.filter(e=>e.eventType!=="departure").length > 0 && `${plannedHires.filter(e=>e.eventType!=="departure").length} hire${plannedHires.filter(e=>e.eventType!=="departure").length>1?"s":""}`,
-                  plannedHires.filter(e=>e.eventType==="departure").length > 0 && `${plannedHires.filter(e=>e.eventType==="departure").length} departure${plannedHires.filter(e=>e.eventType==="departure").length>1?"s":""}`,
-                ].filter(Boolean).join(" + ")} predicted
-              </span>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {(appliedWage.fy26 > 0 || appliedWage.fy27 > 0 || appliedWage.fy28 > 0) && (
+                <span className="flex items-center gap-1.5 text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-full font-semibold">
+                  <TrendUp size={10} className="text-indigo-500"/>
+                  Wage: FY26 {appliedWage.fy26}% · FY27 {appliedWage.fy27}% · FY28 {appliedWage.fy28}% from {appliedWage.effectiveMonth}
+                </span>
+              )}
+              {plannedHires.length > 0 && (
+                <span className="flex items-center gap-1.5 text-[10px] text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
+                  <span className="inline-block w-4 border-t-2 border-dashed border-emerald-500"/>
+                  {[
+                    plannedHires.filter(e=>e.eventType!=="departure").length > 0 && `${plannedHires.filter(e=>e.eventType!=="departure").length} hire${plannedHires.filter(e=>e.eventType!=="departure").length>1?"s":""}`,
+                    plannedHires.filter(e=>e.eventType==="departure").length > 0 && `${plannedHires.filter(e=>e.eventType==="departure").length} departure${plannedHires.filter(e=>e.eventType==="departure").length>1?"s":""}`,
+                  ].filter(Boolean).join(" + ")} predicted
+                </span>
+              )}
+            </div>
           </div>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
@@ -5492,92 +5500,114 @@ function build13WeekForecast(operationalFinancials, startingBalance, cashOverrid
 
 
 // ─── WAGE FORECAST PANEL ──────────────────────────────────────────────────────
-// Holistic % wage increase modeller — threads into buildBaselineData via wageSettings
-function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }) {
-  const fmtK = v => v >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`;
+// Model wage increases in draft, then Apply to commit — flows to Overview + Cashflow
+function WageForecastPanel({ data, draftWage, appliedWage, onDraftChange, onApply, onClear, peopleOverrides }) {
+  const [applying, setApplying] = useState(false);
+  const fmtK  = v => v >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`;
   const fmtAbs = v => `$${Math.abs(Math.round(v)).toLocaleString()}`;
 
-  // Compute baseline (0% increase) monthly staff cost for comparison
-  const baselineMonthlyStaff = useMemo(() => {
-    const people = effectivePeople(peopleOverrides);
-    return people.reduce((s, e) => s + monthlyCostForEntry(e), 0);
-  }, [peopleOverrides]);
+  const isApplied = appliedWage.fy26 > 0 || appliedWage.fy27 > 0 || appliedWage.fy28 > 0;
+  const draftDiffersFromApplied =
+    draftWage.fy26 !== appliedWage.fy26 ||
+    draftWage.fy27 !== appliedWage.fy27 ||
+    draftWage.fy28 !== appliedWage.fy28 ||
+    draftWage.effectiveMonth !== appliedWage.effectiveMonth;
 
-  // Derive per-FY impact from current wageSettings vs 0% baseline
-  const impactByFY = useMemo(() => {
+  // ── Per-FY cost impact for a given wage setting ────────────────────────────
+  const calcImpact = (wages) => {
     const FYS = ["FY26","FY27","FY28"];
+    const COA_CALC_ROWS = ["Gross Wages (IncPAYG)","Superannuation","Payroll Tax"];
     return FYS.map(fy => {
-      const pct = wageSettings[fy.toLowerCase()] || 0;
-      const multiplier = 1 + pct / 100;
+      const pct = wages[fy.toLowerCase()] || 0;
+      const mult = 1 + pct / 100;
       const inflation = COST_INFLATION[fy] || 1;
       const months = MONTH_SCHEDULE.filter(m => m.fy === fy);
-      // Monthly staff cost from COA baseline
-      const COA_CALC_ROWS = ["Gross Wages (IncPAYG)","Superannuation","Payroll Tax"];
-      const annualBaseCOA = months.reduce((s, { mk }) =>
-        s + CHART_OF_ACCOUNTS.filter(ac => COA_CALC_ROWS.includes(ac.account))
-          .reduce((ss, ac) => ss + Math.round((ac.months[mk] || 0) * inflation), 0), 0);
-      const annualExtra = annualBaseCOA * (multiplier - 1);
-      const effectiveMoIdx = wageSettings.effectiveMonth ? ALL_MONTH_LABELS.indexOf(wageSettings.effectiveMonth) : 0;
-      // Count months in this FY that are active
-      const activeMos = months.filter((_, idx) => {
-        const globalIdx = ALL_MONTH_LABELS.indexOf(months[idx].label);
-        return effectiveMoIdx < 0 || globalIdx >= effectiveMoIdx;
-      }).length;
-      const annualExtraActive = activeMos > 0 ? (annualExtra * activeMos / 12) : annualExtra;
-      return { fy, pct, annualBaseCOA, annualExtra: annualExtraActive, activeMos };
+      const effectiveMoIdx = wages.effectiveMonth ? ALL_MONTH_LABELS.indexOf(wages.effectiveMonth) : 0;
+      let annualBase = 0, annualWithIncrease = 0;
+      months.forEach(({ mk, label }) => {
+        const globalIdx = ALL_MONTH_LABELS.indexOf(label);
+        const active = effectiveMoIdx < 0 || globalIdx >= effectiveMoIdx;
+        const base = CHART_OF_ACCOUNTS
+          .filter(ac => COA_CALC_ROWS.includes(ac.account))
+          .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
+        annualBase += base;
+        annualWithIncrease += active ? Math.round(base * mult) : base;
+      });
+      return { fy, pct, extra: annualWithIncrease - annualBase };
     });
-  }, [wageSettings]);
+  };
 
-  // Monthly chart: show baseline staff cost vs wage-increased staff cost per month
+  const draftImpact   = useMemo(() => calcImpact(draftWage),   [draftWage]);
+  const appliedImpact = useMemo(() => calcImpact(appliedWage), [appliedWage]);
+
+  const draftTotalExtra   = draftImpact.reduce((s, x) => s + x.extra, 0);
+  const appliedTotalExtra = appliedImpact.reduce((s, x) => s + x.extra, 0);
+
+  // ── Chart: draft vs applied vs baseline monthly staff cost ────────────────
   const chartData = useMemo(() => {
     const COA_CALC_ROWS = ["Gross Wages (IncPAYG)","Superannuation","Payroll Tax"];
     return MONTH_SCHEDULE.slice(0,36).map(({ label, mk, fy }, i) => {
       const inflation = COST_INFLATION[fy] || 1;
-      const wagePct = wageSettings[fy.toLowerCase()] || 0;
-      const mult = 1 + wagePct / 100;
-      const effectiveMoIdx = wageSettings.effectiveMonth ? ALL_MONTH_LABELS.indexOf(wageSettings.effectiveMonth) : 0;
-      const active = effectiveMoIdx < 0 || i >= effectiveMoIdx;
-      const baseStaff = CHART_OF_ACCOUNTS
+      const base = CHART_OF_ACCOUNTS
         .filter(ac => COA_CALC_ROWS.includes(ac.account))
         .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
-      const withIncrease = active ? Math.round(baseStaff * mult) : baseStaff;
+      const draftPct   = draftWage[fy.toLowerCase()]   || 0;
+      const appliedPct = appliedWage[fy.toLowerCase()] || 0;
+      const effIdx = ALL_MONTH_LABELS.indexOf(draftWage.effectiveMonth || "Jul-26");
+      const active = effIdx < 0 || i >= effIdx;
       return {
         month: label, fy,
-        baseline: baseStaff,
-        withIncrease,
-        delta: withIncrease - baseStaff,
+        baseline: base,
+        draft:    active ? Math.round(base * (1 + draftPct/100))   : base,
+        applied:  active ? Math.round(base * (1 + appliedPct/100)) : base,
       };
     });
-  }, [wageSettings]);
+  }, [draftWage, appliedWage]);
 
-  // FY totals from current data (with wage increase already baked in)
+  // ── FY summary from live data (uses appliedWage) ──────────────────────────
   const fyTotals = useMemo(() => {
-    const FYS = ["FY26","FY27","FY28"];
-    return FYS.map(fy => {
+    return ["FY26","FY27","FY28"].map(fy => {
       const ops = data.operationalFinancials.filter(op => op.fy === fy);
-      const rev = ops.reduce((s, op) => s + op.payments + op.netCashflow, 0);
-      const pmt = ops.reduce((s, op) => s + op.payments, 0);
-      const net = ops.reduce((s, op) => s + op.netCashflow, 0);
-      const closing = ops[ops.length - 1]?.closingBalance || 0;
-      return { fy, rev, pmt, net, closing };
+      return {
+        fy,
+        pmt:     ops.reduce((s, op) => s + op.payments, 0),
+        net:     ops.reduce((s, op) => s + op.netCashflow, 0),
+        rev:     ops.reduce((s, op) => s + op.payments + op.netCashflow, 0),
+        closing: ops[ops.length-1]?.closingBalance || 0,
+      };
     });
   }, [data]);
 
-  const totalExtraAllFY = impactByFY.reduce((s, x) => s + x.annualExtra, 0);
-  const fyLabels = { FY26: "FY 2025–26", FY27: "FY 2026–27", FY28: "FY 2027–28" };
-  const fyColors = { FY26: "#6366f1", FY27: "#8b5cf6", FY28: "#a855f7" };
+  const fyLabels = { FY26:"FY 2025–26", FY27:"FY 2026–27", FY28:"FY 2027–28" };
+  const fyColors = { FY26:"#6366f1",    FY27:"#8b5cf6",    FY28:"#a855f7" };
 
+  const handleApply = async () => {
+    setApplying(true);
+    await onApply(draftWage);
+    setApplying(false);
+  };
+
+  const handleClear = async () => {
+    setApplying(true);
+    await onClear();
+    onDraftChange({ fy26: 0, fy27: 0, fy28: 0, effectiveMonth: draftWage.effectiveMonth });
+    setApplying(false);
+  };
+
+  // ── Slider input ──────────────────────────────────────────────────────────
   const SliderInput = ({ label, fyKey, color }) => {
-    const val = wageSettings[fyKey] || 0;
+    const val = draftWage[fyKey] || 0;
+    const appliedVal = appliedWage[fyKey] || 0;
+    const changed = val !== appliedVal;
     return (
-      <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <div className="flex items-center justify-between mb-2">
+      <div className={`rounded-xl border-2 p-4 transition-all ${changed ? "border-indigo-300 bg-indigo-50/40" : "border-slate-200 bg-white"}`}>
+        <div className="flex items-center justify-between mb-1">
           <span className="text-xs font-bold text-slate-700">{label}</span>
           <div className="flex items-center gap-1.5">
             <input
-              type="number" min={-5} max={30} step={0.5}
+              type="number" min={0} max={30} step={0.5}
               value={val}
-              onChange={e => onWageChange({ ...wageSettings, [fyKey]: parseFloat(e.target.value) || 0 })}
+              onChange={e => onDraftChange({ ...draftWage, [fyKey]: parseFloat(e.target.value) || 0 })}
               className="w-16 text-right px-2 py-1 text-sm font-black border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-400 outline-none"
               style={{ color }}
             />
@@ -5587,42 +5617,56 @@ function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }
         <input
           type="range" min={0} max={20} step={0.5}
           value={val}
-          onChange={e => onWageChange({ ...wageSettings, [fyKey]: parseFloat(e.target.value) })}
+          onChange={e => onDraftChange({ ...draftWage, [fyKey]: parseFloat(e.target.value) })}
           className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
           style={{ accentColor: color }}
         />
-        <div className="flex justify-between text-[9px] text-slate-300 mt-1">
-          <span>0%</span><span>5%</span><span>10%</span><span>15%</span><span>20%</span>
+        <div className="flex items-center justify-between mt-1.5 text-[9px]">
+          <span className="text-slate-300">0% ——— 20%</span>
+          {changed && (
+            <span className="text-indigo-500 font-semibold">
+              draft: {val}% · applied: {appliedVal}%
+            </span>
+          )}
+          {!changed && val > 0 && (
+            <span style={{ color }}>+{fmtAbs(draftImpact.find(x=>x.fy===fyKey.replace('fy','FY').toUpperCase())?.extra || 0)}/yr</span>
+          )}
         </div>
-        {val > 0 && (
-          <p className="text-[10px] mt-2" style={{ color }}>
-            +{fmtAbs(impactByFY.find(x=>x.fy===fyKey.replace('fy','FY').replace('2','2').toUpperCase())?.annualExtra || 0)} additional wage cost
-          </p>
-        )}
       </div>
     );
   };
 
   return (
-    <div className="bg-white rounded-xl border-2 border-indigo-100 overflow-hidden">
-      {/* Header */}
+    <div className="bg-white rounded-xl border-2 border-indigo-100 overflow-hidden shadow-sm">
+
+      {/* ── Header ── */}
       <div className="bg-gradient-to-r from-indigo-600 to-purple-600 px-5 py-4">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <TrendUp size={16} className="text-indigo-200"/>
-              Wage Increase Forecasting
+              Wage Increase Modeller
             </h3>
             <p className="text-[10px] text-indigo-200 mt-0.5">
-              Set % wage increase per financial year · Flows through to all cashflow, P&L, and staffing projections
+              Model changes in draft · Click Apply to commit to Overview, Cashflow, P&L and Audit Log
             </p>
           </div>
-          {totalExtraAllFY > 0 && (
-            <div className="bg-white/15 rounded-xl px-4 py-2 text-center">
-              <p className="text-[10px] text-indigo-200">Total additional cost (3yr)</p>
-              <p className="text-lg font-black text-white">{fmtAbs(totalExtraAllFY)}</p>
-            </div>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            {isApplied && (
+              <div className="bg-emerald-500 rounded-xl px-3 py-1.5 flex items-center gap-1.5">
+                <CheckCircle size={12} className="text-white"/>
+                <span className="text-[10px] font-bold text-white">
+                  APPLIED — FY26:{appliedWage.fy26}% FY27:{appliedWage.fy27}% FY28:{appliedWage.fy28}% from {appliedWage.effectiveMonth}
+                </span>
+              </div>
+            )}
+            {appliedTotalExtra > 0 && (
+              <div className="bg-white/15 rounded-xl px-3 py-1.5 text-center">
+                <p className="text-[9px] text-indigo-200">Active extra cost (3yr)</p>
+                <p className="text-sm font-black text-white">{fmtAbs(appliedTotalExtra)}</p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -5630,65 +5674,99 @@ function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }
 
         {/* ── Sliders ── */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <SliderInput label="FY 2025–26 Wage Increase" fyKey="fy26" color="#6366f1"/>
-          <SliderInput label="FY 2026–27 Wage Increase" fyKey="fy27" color="#8b5cf6"/>
-          <SliderInput label="FY 2027–28 Wage Increase" fyKey="fy28" color="#a855f7"/>
+          <SliderInput label="FY 2025–26" fyKey="fy26" color="#6366f1"/>
+          <SliderInput label="FY 2026–27" fyKey="fy27" color="#8b5cf6"/>
+          <SliderInput label="FY 2027–28" fyKey="fy28" color="#a855f7"/>
         </div>
 
-        {/* ── Effective from month ── */}
+        {/* ── Effective month + action buttons ── */}
         <div className="flex items-center gap-3 flex-wrap">
-          <label className="text-xs font-semibold text-slate-600">Effective from:</label>
+          <label className="text-xs font-semibold text-slate-600 shrink-0">Effective from:</label>
           <select
-            value={wageSettings.effectiveMonth || "Jul-26"}
-            onChange={e => onWageChange({ ...wageSettings, effectiveMonth: e.target.value })}
+            value={draftWage.effectiveMonth || "Jul-26"}
+            onChange={e => onDraftChange({ ...draftWage, effectiveMonth: e.target.value })}
             className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs font-medium bg-white focus:ring-2 focus:ring-indigo-400 outline-none"
           >
             {ALL_MONTH_LABELS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
-          <span className="text-[10px] text-slate-400">Wage increase applies from this month forward</span>
+
+          {/* Apply button — only active when draft differs from applied */}
           <button
-            onClick={() => onWageChange({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" })}
-            className="ml-auto text-[10px] text-slate-400 hover:text-slate-600 px-2 py-1 rounded border border-slate-200 hover:border-slate-400 transition-colors"
-          >Reset to defaults</button>
+            onClick={handleApply}
+            disabled={applying || !draftDiffersFromApplied}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              draftDiffersFromApplied
+                ? "bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-200"
+                : "bg-slate-100 text-slate-400 cursor-not-allowed"
+            }`}
+          >
+            {applying
+              ? <><Loader2 size={12} className="animate-spin"/>Applying…</>
+              : <><CheckCircle size={12}/>Apply to Forecasts</>}
+          </button>
+
+          {isApplied && (
+            <button
+              onClick={handleClear}
+              disabled={applying}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 border border-rose-200 hover:bg-rose-50 transition-colors"
+            >
+              <XCircle size={12}/>Clear Applied
+            </button>
+          )}
+
+          <button
+            onClick={() => onDraftChange({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" })}
+            className="ml-auto text-[10px] text-slate-400 hover:text-slate-600 px-2 py-1 rounded border border-slate-200 transition-colors"
+          >Reset draft</button>
         </div>
 
-        {/* ── Monthly delta chart ── */}
+        {/* ── Draft vs Applied comparison banner ── */}
+        {draftDiffersFromApplied && (draftWage.fy26 > 0 || draftWage.fy27 > 0 || draftWage.fy28 > 0) && (
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3 flex items-start gap-3">
+            <AlertTriangle size={14} className="text-indigo-500 shrink-0 mt-0.5"/>
+            <div className="text-xs text-indigo-800">
+              <span className="font-bold">Draft not yet applied — </span>
+              the chart and FY summaries below show the <span className="font-bold">currently applied</span> settings.
+              {" "}Draft adds <span className="font-bold">{fmtAbs(draftTotalExtra)}</span> over 3 years.
+              {" "}Click <span className="font-bold">Apply to Forecasts</span> to commit this to Overview, Cashflow, and Audit Log.
+            </div>
+          </div>
+        )}
+
+        {/* ── Chart: baseline vs applied vs draft ── */}
         <div>
-          <h4 className="text-xs font-bold text-slate-700 mb-3">Monthly Staff Cost: Baseline vs With Increase</h4>
-          <div className="h-48">
+          <h4 className="text-xs font-bold text-slate-700 mb-1">Monthly Staff Cost Comparison</h4>
+          <p className="text-[10px] text-slate-400 mb-3">Baseline · Applied (flows to Overview) · Draft (modelling only)</p>
+          <div className="h-52">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
-                <XAxis dataKey="month" fontSize={8} tickLine={false} axisLine={false}
-                  tick={{ fill: "#94a3b8" }}
-                  interval={2}
-                />
-                <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={8} tickLine={false} axisLine={false} tick={{ fill: "#94a3b8" }} width={42}/>
-                <Tooltip
-                  contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #e2e8f0" }}
-                  formatter={(v, name) => [`$${Math.round(v).toLocaleString()}`, name]}
-                />
-                <Legend iconType="circle" iconSize={7} wrapperStyle={{ fontSize: 10 }}/>
-                <Area type="monotone" dataKey="baseline" name="Baseline" fill="#e0e7ff" stroke="#818cf8" strokeWidth={1.5} fillOpacity={0.4}/>
-                <Line type="monotone" dataKey="withIncrease" name="With Increase" stroke="#6366f1" strokeWidth={2} dot={false}/>
-                <Bar dataKey="delta" name="Extra Cost" fill="#f43f5e" opacity={0.7} radius={[2,2,0,0]}/>
+                <XAxis dataKey="month" fontSize={8} tickLine={false} axisLine={false} tick={{ fill:"#94a3b8" }} interval={2}/>
+                <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={8} tickLine={false} axisLine={false} tick={{ fill:"#94a3b8" }} width={42}/>
+                <Tooltip contentStyle={{ fontSize:11, borderRadius:8, border:"1px solid #e2e8f0" }}
+                  formatter={(v, name) => [`$${Math.round(v).toLocaleString()}`, name]}/>
+                <Legend iconType="circle" iconSize={7} wrapperStyle={{ fontSize:10 }}/>
+                <Area type="monotone" dataKey="baseline" name="Baseline (Xero)" fill="#e2e8f0" stroke="#94a3b8" strokeWidth={1} fillOpacity={0.5}/>
+                <Line type="monotone" dataKey="applied"  name="Applied (live)" stroke="#6366f1" strokeWidth={2.5} dot={false}/>
+                <Line type="monotone" dataKey="draft"    name="Draft (preview)" stroke="#a855f7" strokeWidth={1.5} dot={false} strokeDasharray="5 3"/>
               </ComposedChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        {/* ── FY impact summary ── */}
+        {/* ── FY impact cards — show applied figures ── */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {fyTotals.map(fy => {
-            const impact = impactByFY.find(x => x.fy === fy.fy);
-            const wagePct = wageSettings[fy.fy.toLowerCase()] || 0;
+          {fyTotals.map((fy, i) => {
+            const ai = appliedImpact[i];
+            const di = draftImpact[i];
             return (
               <div key={fy.fy} className="rounded-xl border border-slate-100 p-4 bg-slate-50">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-slate-700">{fyLabels[fy.fy]}</span>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                    style={{ background: fyColors[fy.fy] + "22", color: fyColors[fy.fy] }}>
-                    +{wagePct}% wages
+                    style={{ background: fyColors[fy.fy]+"22", color: fyColors[fy.fy] }}>
+                    applied: +{ai.pct}%
                   </span>
                 </div>
                 <div className="space-y-1 text-xs">
@@ -5697,15 +5775,19 @@ function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }
                     <span className="font-semibold text-blue-600">{fmtK(fy.rev)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Total Payments</span>
+                    <span className="text-slate-500">Payments</span>
                     <span className="font-semibold text-rose-600">{fmtK(fy.pmt)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Extra Wage Cost</span>
-                    <span className="font-semibold text-amber-600">
-                      {impact?.annualExtra ? `+${fmtK(impact.annualExtra)}` : "—"}
-                    </span>
+                    <span className="text-slate-500">Extra wage cost</span>
+                    <span className="font-semibold text-amber-600">{ai.extra > 0 ? `+${fmtK(ai.extra)}` : "—"}</span>
                   </div>
+                  {di.pct !== ai.pct && (
+                    <div className="flex justify-between text-indigo-500">
+                      <span>Draft extra cost</span>
+                      <span className="font-semibold">{di.extra > 0 ? `+${fmtK(di.extra)}` : "—"}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between border-t border-slate-200 pt-1 mt-1">
                     <span className="text-slate-600 font-semibold">Net Cashflow</span>
                     <span className={`font-black ${fy.net >= 0 ? "text-emerald-600" : "text-rose-600"}`}>{fmtK(fy.net)}</span>
@@ -5720,15 +5802,16 @@ function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }
           })}
         </div>
 
-        {/* ── Cashflow sensitivity note ── */}
-        {totalExtraAllFY > 0 && (
+        {/* ── Sensitivity note for applied settings ── */}
+        {isApplied && appliedTotalExtra > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3">
-            <AlertTriangle size={15} className="text-amber-500 shrink-0 mt-0.5"/>
+            <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5"/>
             <div className="text-xs text-amber-800">
-              <span className="font-bold">Sensitivity note: </span>
-              A {Math.max(wageSettings.fy26||0, wageSettings.fy27||0, wageSettings.fy28||0)}% wage increase adds {fmtAbs(totalExtraAllFY)} to total 3-year costs.
-              {" "}This is {totalExtraAllFY > 0 && fyTotals[0].net > 0 ? `${Math.round(totalExtraAllFY / fyTotals.reduce((s,f)=>s+f.rev,0) * 100)}% of projected 3-year revenue.` : ""}
-              {" "}All cashflow, P&L, and closing balance figures above already reflect this increase.
+              <span className="font-bold">Applied wage increase: </span>
+              FY26 {appliedWage.fy26}% · FY27 {appliedWage.fy27}% · FY28 {appliedWage.fy28}% — effective {appliedWage.effectiveMonth}.
+              {" "}Total 3-year extra cost: <span className="font-bold">{fmtAbs(appliedTotalExtra)}</span>.
+              {" "}This is reflected in all Overview, Cashflow, Expenses and P&L figures.
+              {" "}Recorded in Audit Log.
             </div>
           </div>
         )}
@@ -5736,6 +5819,7 @@ function WageForecastPanel({ data, wageSettings, onWageChange, peopleOverrides }
     </div>
   );
 }
+
 
 function CashFlowForecastView({ data }) {
   const [cashOverrides, setCashOverrides] = useState({});
@@ -6566,7 +6650,9 @@ export default function App() {
   const [coaAdjustments, setCoaAdjustments] = useState({});
   const [peopleOverrides, setPeopleOverrides] = useState({});
   const [hiringEvents, setHiringEvents] = useState([]);
-  const [wageSettings, setWageSettings] = useState({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" });
+  const NULL_WAGE = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: "Jul-26" };
+  const [appliedWage, setAppliedWage] = useState(NULL_WAGE);   // committed — flows into data/cashflow
+  const [draftWage,   setDraftWage]   = useState({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }); // modelling only
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [supaStatus, setSupaStatus] = useState("connecting");
@@ -6633,6 +6719,14 @@ export default function App() {
           const savedPeople = localStorage.getItem("people_overrides");
           if (savedPeople) { try { setPeopleOverrides(JSON.parse(savedPeople)); } catch {} }
         }
+        // Load applied wage settings (stored as single key in coa_adjustments)
+        const wageRow = coaData?.find ? coaData.find(r => r.key === "__wage_settings__") : null;
+        if (wageRow?.value) {
+          try { const w = JSON.parse(wageRow.value); setAppliedWage(w); setDraftWage(w); console.log("✓ Loaded wage settings from Supabase:", w); } catch {}
+        } else {
+          const savedWage = localStorage.getItem("applied_wage_settings");
+          if (savedWage) { try { const w = JSON.parse(savedWage); setAppliedWage(w); setDraftWage(w); } catch {} }
+        }
         setSupaStatus("connected");
       } catch(e) {
         console.warn("Supabase load failed, using localStorage fallback:", e);
@@ -6646,6 +6740,8 @@ export default function App() {
           if(savedCoa) setCoaAdjustments(JSON.parse(savedCoa));
           const savedPeople = localStorage.getItem("people_overrides");
           if(savedPeople) setPeopleOverrides(JSON.parse(savedPeople));
+          const savedWage = localStorage.getItem("applied_wage_settings");
+          if(savedWage) { try { const w = JSON.parse(savedWage); setAppliedWage(w); setDraftWage(w); } catch {} }
         } catch {}
       }
       setLoading(false);
@@ -6655,7 +6751,7 @@ export default function App() {
 
   // Filled hires are treated as committed — they feed into the true cost/revenue position
   const filledHires = useMemo(() => hiringEvents.filter(ev => ev.filled), [hiringEvents]);
-  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, wageSettings), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, wageSettings]);
+  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, wageSettings]);
 
   const availableYears = useMemo(() => {
     const s = new Set();
@@ -6836,7 +6932,41 @@ export default function App() {
     setSaving(false);
   };
 
-  const handleReset = () => {
+  // ── Wage increase: apply (commit to DB + audit) ────────────────────────────
+  const handleApplyWage = async (draft) => {
+    const prev = { ...appliedWage };
+    setAppliedWage(draft);
+    localStorage.setItem("applied_wage_settings", JSON.stringify(draft));
+    try {
+      const ok = await sbUpsert("coa_adjustments", [{ key: "__wage_settings__", value: JSON.stringify(draft) }]);
+      if (!ok) throw new Error("Supabase upsert failed for wage settings");
+      await sbAudit(currentUser, "UPDATE", "WAGE",
+        `Wage increase applied — FY26: ${draft.fy26}%, FY27: ${draft.fy27}%, FY28: ${draft.fy28}%, effective from ${draft.effectiveMonth}`,
+        prev,
+        draft
+      );
+    } catch(e) {
+      console.error("Wage settings save failed:", e);
+      alert("⚠️ Wage settings saved locally but DB write failed: " + e.message);
+    }
+  };
+
+  const handleClearWage = async () => {
+    const prev = { ...appliedWage };
+    const cleared = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: appliedWage.effectiveMonth };
+    setAppliedWage(cleared);
+    localStorage.setItem("applied_wage_settings", JSON.stringify(cleared));
+    try {
+      await sbDelete("coa_adjustments", { key: "__wage_settings__" });
+      await sbAudit(currentUser, "DELETE", "WAGE",
+        `Wage increase cleared (reset to 0%)`,
+        prev,
+        cleared
+      );
+    } catch(e) { console.error("Wage clear failed:", e); }
+  };
+
+    const handleReset = () => {
     if(confirm("Reset all data? This will clear your adjustments and hiring plan.")) {
       sbAudit(currentUser, "DELETE", "UNIT", "Reset all unit + COA + hiring data");
       setUnitAdjustments({});
@@ -6873,7 +7003,7 @@ export default function App() {
   );
 
   const props = {data, yearBasis, selectedYear};
-  const wageProps = { wageSettings, onWageChange: setWageSettings, peopleOverrides };
+  const wageProps = { draftWage, appliedWage, onDraftChange: setDraftWage, onApply: handleApplyWage, onClear: handleClearWage, peopleOverrides };
 
   return (
     <Layout
@@ -6886,7 +7016,7 @@ export default function App() {
       currentUser={currentUser}
       onLogout={handleLogout}
     >
-      {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
+      {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
       {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CashFlowForecastView data={data}/></div>}
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
