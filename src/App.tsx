@@ -169,12 +169,12 @@ function fmtAUD(v, compact=true) {
 
 // ─── STATIC DATA FROM JSONs ────────────────────────────────────────────────────
 const UNIT_RATES = {
-  MSL20122:{QLD:338.75,NSW:null,NT:null,TAS:null,ACT:null,VIC:300,WA:977.4,SA:null},
-  MSL30122:{QLD:391.69,NSW:594.62,NT:358.4,TAS:384.69,ACT:319.23,VIC:581.54,WA:601.48,SA:321.23},
-  MSL40122:{QLD:775,NSW:782.67,NT:481.6,TAS:616.07,ACT:657.33,VIC:931,WA:1051.59,SA:396.27},
-  MSL50122:{QLD:265.56,NSW:815.56,NT:733.6,TAS:450,ACT:492.78,VIC:556.11,WA:654.66,SA:324.88},
-  HLT37215:{QLD:450.71,NSW:552.14,NT:432.14,TAS:322.64,ACT:350.71,VIC:417.86,WA:558.51,SA:278.64},
-  FFS:{QLD:350,NSW:350,NT:350,TAS:350,ACT:350,VIC:350,WA:350,SA:350}
+  MSL20122:{QLD:338.75,NSW:null,NT:null,TAS:null,ACT:null,VIC:300,WA:977.4,SA:null,EP:338.75},
+  MSL30122:{QLD:391.69,NSW:594.62,NT:358.4,TAS:384.69,ACT:319.23,VIC:581.54,WA:601.48,SA:321.23,EP:391.69},
+  MSL40122:{QLD:775,NSW:782.67,NT:481.6,TAS:616.07,ACT:657.33,VIC:931,WA:1051.59,SA:396.27,EP:775},
+  MSL50122:{QLD:265.56,NSW:815.56,NT:733.6,TAS:450,ACT:492.78,VIC:556.11,WA:654.66,SA:324.88,EP:265.56},
+  HLT37215:{QLD:450.71,NSW:552.14,NT:432.14,TAS:322.64,ACT:350.71,VIC:417.86,WA:558.51,SA:278.64,EP:450.71},
+  FFS:{QLD:350,NSW:350,NT:350,TAS:350,ACT:350,VIC:350,WA:350,SA:350,EP:350}
 };
 
 const BUDGET_INPUTS = [
@@ -373,6 +373,16 @@ const UNIT_ASSUMPTIONS_FY26 = {
     MSL50122: {price: UNIT_RATES.MSL50122.SA, monthly: {Jul:0,Aug:0,Sep:2,Oct:2,Nov:2,Dec:1,Jan:1,Feb:2,Mar:4,Apr:8,May:8,Jun:9}},
     HLT37215: {price: UNIT_RATES.HLT37215.SA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:5,May:15,Jun:30}},
     FFS:      {price: UNIT_RATES.FFS.SA,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+  },
+  EP: {
+    // Education Pathways — national delivery stream (not state-based)
+    // Uses QLD-equivalent pricing; volumes reflect cross-state online/blended delivery
+    MSL20122: {price: UNIT_RATES.MSL20122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL30122: {price: UNIT_RATES.MSL30122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL40122: {price: UNIT_RATES.MSL40122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL50122: {price: UNIT_RATES.MSL50122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    HLT37215: {price: UNIT_RATES.HLT37215.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    FFS:      {price: UNIT_RATES.FFS.EP,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   }
 };
 
@@ -537,7 +547,7 @@ function getMonthlyCost(roleId) {
 
 // ─── COLORS ──────────────────────────────────────────────────────────────────
 const COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16"];
-const REGION_COLORS = {QLD:"#f59e0b",NSW:"#3b82f6",NT:"#ef4444",TAS:"#10b981",ACT:"#8b5cf6",VIC:"#06b6d4",WA:"#ec4899",SA:"#84cc16"};
+const REGION_COLORS = {QLD:"#f59e0b",NSW:"#3b82f6",NT:"#ef4444",TAS:"#10b981",ACT:"#8b5cf6",VIC:"#06b6d4",WA:"#ec4899",SA:"#84cc16",EP:"#0d9488"};
 
 // ─── STATS CARD ───────────────────────────────────────────────────────────────
 function StatsCard({title, value, trend, icon: Icon, color}) {
@@ -1192,7 +1202,7 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   const [role, setRole] = useState(STAFF_ROLES[0].id);
   const [count, setCount] = useState(1);
   const [startMonth, setStartMonth] = useState(months[0]||"");
-  const [region, setRegion] = useState(regions[0]||"QLD");
+  const [region, setRegion] = useState(regions[0]||"");
   const [aStart, setAStart] = useState(months[0]||"");
   const [aEnd, setAEnd] = useState(months[months.length-1]||"");
 
@@ -2519,7 +2529,7 @@ function CRMSalesReport({ data }) {
   const [uploadError, setUploadError] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [viewFY, setViewFY] = useState("FY26");
-  const [unitRegion, setUnitRegion] = useState("QLD");
+  const [unitRegion, setUnitRegion] = useState(data?.regions?.[0]?.region || "QLD");
   const fileInputRef = useCallback(n => n, []);
 
   const FY_DEFS = {
@@ -4582,7 +4592,7 @@ ${topExpenses.map((e, i) => `${i+1}. ${e.account} (${e.section}): ${fmtAUD(e.tot
 - Key roles include: Sales Consultants, Training Coordinators, Operations, Management
 
 ## REVENUE MODEL
-- Revenue driven by course unit enrolments across 7 regions (QLD, NSW, VIC, SA, WA, TAS, NT/ACT)
+- Revenue driven by course unit enrolments across 8 regions (QLD, NSW, VIC, SA, WA, TAS, NT/ACT) plus EP (Education Pathways — national delivery stream)
 - Key qualifications: MSL20122, MSL30122, MSL40122, MSL50122, HLT37215
 - Sales model: linear ramp — 21 units/month from month 4, targeting $100k/month per salesperson by month 13
 - Average unit value varies by region (~$471/unit in QLD)
@@ -5394,11 +5404,12 @@ function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, h
 
 // Government claim cycles for Australian RTOs
 const CLAIM_CYCLES = [
-  { id: "qld_skills",  label: "QLD Skills Assure",   color: "#f59e0b", dayOfMonth: 15,  lagWeeks: 3 },
-  { id: "nsw_skills",  label: "NSW Smart & Skilled",  color: "#3b82f6", dayOfMonth: 1,   lagWeeks: 4 },
-  { id: "nt_training", label: "NT Training",          color: "#ef4444", dayOfMonth: 20,  lagWeeks: 2 },
-  { id: "tas_sgs",     label: "TAS SGS",              color: "#10b981", dayOfMonth: 10,  lagWeeks: 3 },
-  { id: "fee_for_svc", label: "Fee-for-Service",      color: "#8b5cf6", dayOfMonth: 0,   lagWeeks: 0 }, // weekly
+  { id: "qld_skills",  label: "QLD Skills Assure",       color: "#f59e0b", dayOfMonth: 15,  lagWeeks: 3 },
+  { id: "nsw_skills",  label: "NSW Smart & Skilled",      color: "#3b82f6", dayOfMonth: 1,   lagWeeks: 4 },
+  { id: "nt_training", label: "NT Training",              color: "#ef4444", dayOfMonth: 20,  lagWeeks: 2 },
+  { id: "tas_sgs",     label: "TAS SGS",                  color: "#10b981", dayOfMonth: 10,  lagWeeks: 3 },
+  { id: "ep_pathways", label: "Education Pathways (EP)",  color: "#0d9488", dayOfMonth: 20,  lagWeeks: 2 },
+  { id: "fee_for_svc", label: "Fee-for-Service",          color: "#8b5cf6", dayOfMonth: 0,   lagWeeks: 0 }, // weekly
 ];
 
 // Scheduled recurring payments (day-of-month triggers)
@@ -5438,11 +5449,12 @@ function build13WeekForecast(operationalFinancials, startingBalance, cashOverrid
     const op     = monthlyMap[mLabel] || { payments: 0 };
 
     // Revenue receipts this week (government cycles)
-    // QLD: mid-month, ~$180k/month → weekly spread with a spike at week containing 15th
-    const qldWeekly = (op && op.revenue) ? op.revenue * 0.55 / 4 : 45000;
-    const nswWeekly = (op && op.revenue) ? op.revenue * 0.25 / 4 : 18000;
-    const ntWeekly  = (op && op.revenue) ? op.revenue * 0.08 / 4 : 5500;
-    const tasWeekly = (op && op.revenue) ? op.revenue * 0.05 / 4 : 3500;
+    // Split: QLD 50%, NSW 22%, NT 7%, TAS 4%, EP 10%, FFS 7%
+    const qldWeekly = (op && op.revenue) ? op.revenue * 0.50 / 4 : 41000;
+    const nswWeekly = (op && op.revenue) ? op.revenue * 0.22 / 4 : 16000;
+    const ntWeekly  = (op && op.revenue) ? op.revenue * 0.07 / 4 : 4800;
+    const tasWeekly = (op && op.revenue) ? op.revenue * 0.04 / 4 : 2800;
+    const epWeekly  = (op && op.revenue) ? op.revenue * 0.10 / 4 : 7000;
     const ffsWeekly = (op && op.revenue) ? op.revenue * 0.07 / 4 : 4800;
 
     // Spike claims on government payment days
@@ -5450,12 +5462,14 @@ function build13WeekForecast(operationalFinancials, startingBalance, cashOverrid
     const qldSpike  = (dayInMonth >= 13 && dayInMonth <= 19) ? qldWeekly * 2.2 : qldWeekly * 0.6;
     const nswSpike  = (dayInMonth >= 1  && dayInMonth <= 7)  ? nswWeekly * 2.8 : nswWeekly * 0.4;
     const ntSpike   = (dayInMonth >= 18 && dayInMonth <= 24) ? ntWeekly  * 2.5 : ntWeekly  * 0.5;
+    const epSpike   = (dayInMonth >= 18 && dayInMonth <= 24) ? epWeekly  * 2.2 : epWeekly  * 0.6;
 
     const receipts = {
       qld_skills:  Math.round(cashOverrides[`${wKey}_qld`]  ?? qldSpike),
       nsw_skills:  Math.round(cashOverrides[`${wKey}_nsw`]  ?? nswSpike),
       nt_training: Math.round(cashOverrides[`${wKey}_nt`]   ?? ntSpike),
       tas_sgs:     Math.round(cashOverrides[`${wKey}_tas`]  ?? tasWeekly),
+      ep_pathways: Math.round(cashOverrides[`${wKey}_ep`]   ?? epSpike),
       fee_for_svc: Math.round(cashOverrides[`${wKey}_ffs`]  ?? ffsWeekly),
     };
     const totalReceipts = Object.values(receipts).reduce((s,v) => s+v, 0);
@@ -5859,6 +5873,7 @@ function CashFlowForecastView({ data }) {
     nsw: w.receipts.nsw_skills,
     nt:  w.receipts.nt_training,
     tas: w.receipts.tas_sgs,
+    ep:  w.receipts.ep_pathways,
     ffs: w.receipts.fee_for_svc,
   }));
 
@@ -5968,11 +5983,12 @@ function CashFlowForecastView({ data }) {
               <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={9} tickLine={false} axisLine={false}/>
               <Tooltip formatter={(v,n) => [fmtK(v), n]} contentStyle={{ borderRadius:"8px", border:"none", boxShadow:"0 4px 12px rgba(0,0,0,0.08)" }}/>
               <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize:10 }}/>
-              <Bar dataKey="qld" name="QLD Skills Assure"    stackId="a" fill="#f59e0b"/>
-              <Bar dataKey="nsw" name="NSW Smart & Skilled"  stackId="a" fill="#3b82f6"/>
-              <Bar dataKey="nt"  name="NT Training"          stackId="a" fill="#ef4444"/>
-              <Bar dataKey="tas" name="TAS SGS"              stackId="a" fill="#10b981"/>
-              <Bar dataKey="ffs" name="Fee-for-Service"      stackId="a" fill="#8b5cf6" radius={[3,3,0,0]}/>
+              <Bar dataKey="qld" name="QLD Skills Assure"       stackId="a" fill="#f59e0b"/>
+              <Bar dataKey="nsw" name="NSW Smart & Skilled"   stackId="a" fill="#3b82f6"/>
+              <Bar dataKey="nt"  name="NT Training"           stackId="a" fill="#ef4444"/>
+              <Bar dataKey="tas" name="TAS SGS"               stackId="a" fill="#10b981"/>
+              <Bar dataKey="ep"  name="Education Pathways"    stackId="a" fill="#0d9488"/>
+              <Bar dataKey="ffs" name="Fee-for-Service"       stackId="a" fill="#8b5cf6" radius={[3,3,0,0]}/>
             </BarChart>
           </ResponsiveContainer>
         </div>
