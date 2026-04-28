@@ -4697,9 +4697,63 @@ function AnomalyBadge({ anomalies, anomalyStatus, onClick }) {
 }
 
 // ─── ANOMALY PANEL (full list view) ───────────────────────────────────────────
-function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan }) {
+function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan, currentUser }) {
   const severityColor = { high: "border-rose-200 bg-rose-50", medium: "border-amber-100 bg-amber-50/50" };
   const severityBadge = { high: "bg-rose-100 text-rose-700", medium: "bg-amber-100 text-amber-700" };
+
+  // Per-anomaly rectification state, keyed by `${section}|${account}|${mk}`.
+  // Persisted to localStorage so resolution survives rescans + reloads.
+  const anomalyId = (a) => `${a.section}|${a.account}|${a.mk}`;
+  const [rectifiedMap, setRectifiedMap] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("anomaly_rectified") || "{}"); }
+    catch { return {}; }
+  });
+  const [rectifyOpenFor, setRectifyOpenFor] = useState(null); // anomaly id
+  const [rectifyNote, setRectifyNote] = useState("");
+  const [showRectified, setShowRectified] = useState(false);
+
+  const persistMap = (next) => {
+    setRectifiedMap(next);
+    localStorage.setItem("anomaly_rectified", JSON.stringify(next));
+  };
+
+  const userLabel = (email) => email ? email.split("@")[0].replace(/[._]/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "—";
+
+  const handleRectify = async (a) => {
+    const id = anomalyId(a);
+    const note = rectifyNote.trim();
+    if (!note) return;
+    const rectifiedBy = currentUser?.email || "unknown";
+    const rectifiedAt = new Date().toISOString();
+    persistMap({ ...rectifiedMap, [id]: { rectified: true, note, rectifiedAt, rectifiedBy } });
+    setRectifyOpenFor(null);
+    setRectifyNote("");
+    try {
+      await sbAudit(currentUser, "RECTIFY", "ANOMALY",
+        `Rectified ${a.account} (${a.mk}, ${a.section}) — ${note}`,
+        { severity: a.severity, actual: a.actual, forecast: a.forecast, absVariance: a.absVariance },
+        { rectifiedBy, rectifiedAt, note }
+      );
+    } catch(e) { console.warn("Audit log for anomaly rectify failed:", e); }
+  };
+
+  const handleReopen = async (a) => {
+    const id = anomalyId(a);
+    const prev = rectifiedMap[id];
+    const next = { ...rectifiedMap };
+    delete next[id];
+    persistMap(next);
+    try {
+      await sbAudit(currentUser, "UPDATE", "ANOMALY",
+        `Reopened anomaly ${a.account} (${a.mk}, ${a.section})`,
+        prev || null,
+        null
+      );
+    } catch(e) { console.warn("Audit log for anomaly reopen failed:", e); }
+  };
+
+  const openAnomalies      = anomalies.filter(a => !rectifiedMap[anomalyId(a)]);
+  const rectifiedAnomalies = anomalies.filter(a =>  rectifiedMap[anomalyId(a)]);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
@@ -4734,39 +4788,135 @@ function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan }) {
           <p className="text-sm font-medium text-emerald-600">No anomalies detected</p>
           <p className="text-xs mt-1">All actuals are within expected ranges vs forecast</p>
         </div>
+      ) : openAnomalies.length === 0 ? (
+        <div className="px-6 py-10 text-center text-slate-400">
+          <CheckCircle size={28} className="mx-auto mb-3 text-emerald-400"/>
+          <p className="text-sm font-medium text-emerald-600">All anomalies rectified</p>
+          <p className="text-xs mt-1">{rectifiedAnomalies.length} anomaly(ies) addressed — see history below</p>
+        </div>
       ) : (
         <div className="divide-y divide-slate-50">
-          {anomalies.map((a, i) => (
-            <div key={i} className={`px-6 py-4 border-l-4 ${severityColor[a.severity] || severityColor.medium}`}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${severityBadge[a.severity]}`}>
-                      {a.severity.toUpperCase()}
-                    </span>
-                    <span className="text-xs font-bold text-slate-800">{a.account}</span>
-                    <span className="text-[10px] text-slate-400">{a.mk}-26 · {a.section}</span>
+          {openAnomalies.map((a) => {
+            const id = anomalyId(a);
+            const isRectifying = rectifyOpenFor === id;
+            return (
+              <div key={id} className={`px-6 py-4 border-l-4 ${severityColor[a.severity] || severityColor.medium}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${severityBadge[a.severity]}`}>
+                        {a.severity.toUpperCase()}
+                      </span>
+                      <span className="text-xs font-bold text-slate-800">{a.account}</span>
+                      <span className="text-[10px] text-slate-400">{a.mk}-26 · {a.section}</span>
+                    </div>
+                    <p className="text-xs text-slate-600 mb-2">{a.explanation}</p>
+                    <div className="flex gap-4 text-[10px] flex-wrap">
+                      <span><span className="text-slate-400">Actual:</span> <span className="font-bold text-slate-700">{fmtAUD(a.actual, false)}</span></span>
+                      <span><span className="text-slate-400">Forecast:</span> <span className="font-mono text-slate-500">{fmtAUD(a.forecast, false)}</span></span>
+                      <span><span className="text-slate-400">Variance:</span> <span className={`font-bold ${a.absVariance > 0 ? "text-rose-600" : "text-emerald-600"}`}>{a.absVariance>=0?"+":""}{fmtAUD(a.absVariance, false)}</span></span>
+                      <span><span className="text-slate-400">vs avg:</span> <span className="font-bold text-slate-600">{a.vsAvgRatio}×</span></span>
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-600 mb-2">{a.explanation}</p>
-                  <div className="flex gap-4 text-[10px] flex-wrap">
-                    <span><span className="text-slate-400">Actual:</span> <span className="font-bold text-slate-700">{fmtAUD(a.actual, false)}</span></span>
-                    <span><span className="text-slate-400">Forecast:</span> <span className="font-mono text-slate-500">{fmtAUD(a.forecast, false)}</span></span>
-                    <span><span className="text-slate-400">Variance:</span> <span className={`font-bold ${a.absVariance > 0 ? "text-rose-600" : "text-emerald-600"}`}>{a.absVariance>=0?"+":""}{fmtAUD(a.absVariance, false)}</span></span>
-                    <span><span className="text-slate-400">vs avg:</span> <span className="font-bold text-slate-600">{a.vsAvgRatio}×</span></span>
+                  <div className={`shrink-0 flex items-center gap-1 text-[10px] font-semibold ${a.concern ? "text-rose-600" : "text-emerald-600"}`}>
+                    {a.concern ? <XCircle size={12}/> : <CheckCircle size={12}/>}
+                    {a.concern ? "Action needed" : "Expected"}
                   </div>
                 </div>
-                <div className={`shrink-0 flex items-center gap-1 text-[10px] font-semibold ${a.concern ? "text-rose-600" : "text-emerald-600"}`}>
-                  {a.concern ? <XCircle size={12}/> : <CheckCircle size={12}/>}
-                  {a.concern ? "Action needed" : "Expected"}
+                {a.action && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-2.5 py-1.5 rounded-lg w-fit">
+                    <ChevronRight size={10}/>{a.action}
+                  </div>
+                )}
+
+                {/* Rectify control */}
+                <div className="mt-3">
+                  {!isRectifying ? (
+                    <button onClick={() => { setRectifyOpenFor(id); setRectifyNote(""); }}
+                      className="flex items-center gap-1.5 text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg transition-colors">
+                      <CheckCircle size={11}/>Rectify
+                    </button>
+                  ) : (
+                    <div className="bg-white border border-emerald-200 rounded-lg p-3 space-y-2">
+                      <label className="text-[11px] font-semibold text-emerald-700 block">
+                        Rectification note <span className="text-rose-500">*</span>
+                      </label>
+                      <textarea
+                        value={rectifyNote}
+                        onChange={e => setRectifyNote(e.target.value)}
+                        placeholder="What was the cause / what action was taken? (e.g. 'One-off Q3 conference travel — confirmed with COO, not recurring')"
+                        rows={3}
+                        autoFocus
+                        className="w-full text-xs px-2.5 py-1.5 border border-slate-300 rounded outline-none focus:ring-2 focus:ring-emerald-400 resize-none"/>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => handleRectify(a)}
+                          disabled={!rectifyNote.trim()}
+                          className="flex items-center gap-1.5 text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white px-3 py-1.5 rounded transition-colors">
+                          <CheckCircle size={11}/>Save & Rectify
+                        </button>
+                        <button onClick={() => { setRectifyOpenFor(null); setRectifyNote(""); }}
+                          className="text-[11px] text-slate-500 hover:text-slate-700 px-2 py-1.5">
+                          Cancel
+                        </button>
+                        <span className="ml-auto text-[10px] text-slate-400">
+                          Logged to audit trail under <strong>ANOMALY</strong>
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-              {a.action && (
-                <div className="mt-2 flex items-center gap-1.5 text-[10px] text-indigo-600 bg-indigo-50 px-2.5 py-1.5 rounded-lg w-fit">
-                  <ChevronRight size={10}/>{a.action}
-                </div>
-              )}
+            );
+          })}
+        </div>
+      )}
+
+      {/* Rectified history */}
+      {rectifiedAnomalies.length > 0 && (
+        <div className="border-t border-slate-100">
+          <button onClick={() => setShowRectified(v => !v)}
+            className="w-full flex items-center justify-between px-6 py-3 hover:bg-slate-50 transition-colors">
+            <span className="text-xs font-bold text-slate-700 flex items-center gap-2">
+              <CheckCircle size={13} className="text-emerald-500"/>
+              Rectified ({rectifiedAnomalies.length})
+            </span>
+            <ChevronRight size={13} className={`text-slate-400 transition-transform ${showRectified ? "rotate-90" : ""}`}/>
+          </button>
+          {showRectified && (
+            <div className="border-t border-slate-100 divide-y divide-slate-50">
+              {rectifiedAnomalies.map((a) => {
+                const id = anomalyId(a);
+                const r = rectifiedMap[id] || {};
+                return (
+                  <div key={id} className="px-6 py-3 bg-emerald-50/30">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <CheckCircle size={11} className="text-emerald-500 shrink-0"/>
+                          <span className="text-xs font-semibold text-slate-700">{a.account}</span>
+                          <span className="text-[10px] text-slate-400">{a.mk}-26 · {a.section}</span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${severityBadge[a.severity]}`}>
+                            {a.severity.toUpperCase()}
+                          </span>
+                        </div>
+                        {r.note && (
+                          <p className="text-[11px] text-slate-600 mt-1 italic leading-relaxed">"{r.note}"</p>
+                        )}
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Rectified by <strong className="text-slate-600">{userLabel(r.rectifiedBy)}</strong>
+                          {r.rectifiedAt && ` · ${new Date(r.rectifiedAt).toLocaleString("en-AU")}`}
+                        </p>
+                      </div>
+                      <button onClick={() => handleReopen(a)}
+                        className="text-[10px] text-amber-600 hover:text-amber-800 font-semibold underline shrink-0">
+                        Reopen
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>
@@ -7891,7 +8041,7 @@ export default function App() {
       {activeTab==="audit"     && <AuditLogView/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
-          <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan}/>
+          <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan} currentUser={currentUser}/>
           <MonthlyNarrativePanel data={data} coaAdjustments={coaAdjustments} currentUser={currentUser}/>
           <CashflowForecastPanel data={data} coaAdjustments={coaAdjustments}/>
         </div>
