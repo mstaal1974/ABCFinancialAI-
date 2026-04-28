@@ -3616,6 +3616,7 @@ function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments, c
     const reviewable = flags.filter(f => !flagStates[f.id]?.rectified);
     if (reviewable.length === 0) return;
     setAiLoading(true);
+    setAiNarrative("");
     try {
       const summary = reviewable.map(f =>
         `[${f.severity.toUpperCase()}] ${f.category} — ${f.title}\nExpected: ${f.expected}\nActual: ${f.actual}\nImpact: ${f.impact}`
@@ -3623,20 +3624,12 @@ function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments, c
 
       const opFin = data.operationalFinancials;
       const fy26 = opFin.filter(op => op.fy === "FY26");
-      const totalRev = fy26.reduce((s,op) => s + op.payments + op.netCashflow, 0);
+      const totalRev = fy26.reduce((s,op) => s + op.revenue, 0);
       const totalPmt = fy26.reduce((s,op) => s + op.payments, 0);
       const closingBal = fy26[fy26.length-1]?.closingBalance || 0;
 
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: "You are a financial controller auditing a React-based BI dashboard for an Australian RTO (Registered Training Organisation). You review calculation flags and provide a concise, professional audit narrative. Respond in 3-4 short paragraphs. Be specific about which flags are most critical and why. Do NOT suggest code changes — only assess financial accuracy and risk.",
-          messages: [{
-            role: "user",
-            content: `Please review these calculation audit flags for our EduGrowth BI dashboard and provide an audit assessment.
+      const systemPrompt = "You are a financial controller auditing a React-based BI dashboard for an Australian RTO (Registered Training Organisation). You review calculation flags and provide a concise, professional audit narrative. Respond in 3-4 short paragraphs. Be specific about which flags are most critical and why. Do NOT suggest code changes — only assess financial accuracy and risk.";
+      const userPrompt = `Please review these calculation audit flags for our EduGrowth BI dashboard and provide an audit assessment.
 
 FY26 Financial Summary:
 - Total Revenue: $${Math.round(totalRev).toLocaleString()}
@@ -3646,15 +3639,13 @@ FY26 Financial Summary:
 Flags Found (${reviewable.length} open):
 ${summary}
 
-Please assess: (1) which flags most materially affect financial accuracy, (2) whether the cashflow figures are reliable given these flags, (3) any reconciliation steps recommended before presenting to management.`
-          }]
-        })
-      });
-      const result = await resp.json();
-      const text = result.content?.find(c => c.type === "text")?.text || "No response";
-      setAiNarrative(text);
+Please assess: (1) which flags most materially affect financial accuracy, (2) whether the cashflow figures are reliable given these flags, (3) any reconciliation steps recommended before presenting to management.`;
+
+      const text = await callGemini(userPrompt, systemPrompt, 1024);
+      setAiNarrative(text || "No response from AI.");
     } catch(e) {
-      setAiNarrative("AI review failed: " + e.message);
+      console.error("Calc Audit AI review failed:", e);
+      setAiNarrative("AI review failed: " + (e?.message || "unknown error"));
     }
     setAiLoading(false);
   };
@@ -3914,10 +3905,10 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
               <p className="text-slate-400 text-xs italic">
                 {openFlags.length === 0
                   ? (flags.length === 0 ? "Run the audit first to enable AI assessment." : "All flags rectified — nothing to review.")
-                  : "Click \"Get AI Assessment\" to have Claude review these flags and provide a financial controller\'s assessment."}
+                  : "Click \"Get AI Assessment\" for a financial controller\'s review of these flags."}
               </p>
             )}
-            <p className="text-[10px] text-slate-300 mt-3">AI assessment is advisory only. No data is modified. Powered by Anthropic Claude.</p>
+            <p className="text-[10px] text-slate-300 mt-3">AI assessment is advisory only. No data is modified. Powered by Gemini.</p>
           </div>
         </>
       )}
