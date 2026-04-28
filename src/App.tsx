@@ -4939,14 +4939,31 @@ function DonutChart({ data, size = 180, thickness = 34, label, sublabel }) {
   );
 }
 
-function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, hiringEvents = [] }) {
+function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, hiringEvents = [], yearBasis = "financial", selectedYear = "All", setYearBasis, setSelectedYear }) {
   const [activeGroup, setActiveGroup] = useState(null);
   const [editCell, setEditCell] = useState(null); // { key, field }
   const [editVal, setEditVal]   = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({ role: "", location: "", base_salary: 70000, car_allowance: 0, phone_allowance: 0, number: 1 });
-  const [activeFY, setActiveFY] = useState("FY26");
   const editInputRef = useCallback(node => { if (node) { node.focus(); node.select(); } }, []);
+
+  // Active FY for the Monthly Payroll chart — derived from the global header
+  // selection so the FY/CY toggle and year picker drive this view.
+  // CY → FY ending in same calendar year (CY2025/26→FY26, CY2027→FY27, CY2028→FY28).
+  const FY_TABS = ["FY26", "FY27", "FY28"];
+  const activeFY = useMemo(() => {
+    if (yearBasis === "financial" && FY_TABS.includes(selectedYear)) return selectedYear;
+    if (yearBasis === "calendar") {
+      const cyToFY = { "2025":"FY26", "2026":"FY26", "2027":"FY27", "2028":"FY28" };
+      if (cyToFY[selectedYear]) return cyToFY[selectedYear];
+    }
+    return "FY26";
+  }, [yearBasis, selectedYear]);
+
+  const selectFY = (fy) => {
+    setYearBasis?.("financial");
+    setSelectedYear?.(fy);
+  };
 
   const people = useMemo(() => effectivePeople(peopleOverrides), [peopleOverrides]);
   const filledHires = useMemo(() => hiringEvents.filter(e => e.filled), [hiringEvents]);
@@ -5023,6 +5040,38 @@ function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, h
 
   // Filter to active FY
   const trendInFY = useMemo(() => monthlyTrendData.filter(d => d.fy === activeFY), [monthlyTrendData, activeFY]);
+
+  // ── Headcount by region (incl. EP) ─────────────────────────────────────────
+  // Buckets staff (BUDGET_INPUTS + people overrides) and confirmed hires by
+  // their location/region. Locations not present in REGION_COLORS (e.g.
+  // "Head office") are still listed.
+  const REGION_LIST = ["QLD","NSW","VIC","SA","NT","ACT","TAS","EP","Head office"];
+  const regionStats = useMemo(() => {
+    return REGION_LIST.map(loc => {
+      const members = people.filter(p => p.location === loc);
+      const baseHeadcount = members.reduce((s, p) => s + p.number, 0);
+      const baseAnnualCost = members.reduce((s, p) => s + annualCostForEntry(p), 0);
+      const hireRows = filledHires
+        .filter(ev => ev.eventType !== "departure" && (ev.region || "") === loc)
+        .map(ev => {
+          const role = STAFF_ROLES.find(r => r.id === ev.roleId);
+          const annualCost = role
+            ? ((role.baseWage + role.carAllowance + role.phoneAllowance) + role.baseWage * 0.12) * (1 + role.payrollTaxRate) * Number(ev.count)
+            : 0;
+          return { ...ev, annualCost };
+        });
+      const hireHeadcount = hireRows.reduce((s, r) => s + Number(r.count), 0);
+      const hireAnnualCost = hireRows.reduce((s, r) => s + r.annualCost, 0);
+      return {
+        location: loc,
+        color: REGION_COLORS[loc] || "#64748b",
+        headcount: baseHeadcount + hireHeadcount,
+        annualCost: baseAnnualCost + hireAnnualCost,
+        hireHeadcount,
+      };
+    });
+  }, [people, filledHires]);
+  const regionMaxHeadcount = Math.max(1, ...regionStats.map(r => r.headcount));
 
   // Cost breakdown (base / allowances / super / payroll tax)
   const costComponents = useMemo(() => {
@@ -5180,13 +5229,43 @@ function StaffingView({ peopleOverrides, onUpdatePeople, onSavePeople, saving, h
         </div>
       </div>
 
+      {/* ── Headcount by Region ── */}
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-slate-700">Headcount by Region</h3>
+            <p className="text-[10px] text-slate-400 mt-0.5">Staff base + confirmed hires, bucketed by location · includes EP delivery stream</p>
+          </div>
+          <span className="text-[10px] text-slate-400">{regionStats.filter(r => r.headcount > 0).length} of {regionStats.length} regions staffed</span>
+        </div>
+        <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2.5">
+          {regionStats.map(r => (
+            <div key={r.location}
+              className={`rounded-lg p-3 border transition-colors ${r.headcount > 0 ? "bg-slate-50 border-slate-200" : "bg-white border-dashed border-slate-200"}`}>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: r.color }}/>
+                <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wide truncate">{r.location}</span>
+              </div>
+              <p className={`text-2xl font-black leading-none ${r.headcount > 0 ? "text-slate-800" : "text-slate-300"}`}>{r.headcount}</p>
+              <p className="text-[10px] text-slate-400 mt-1.5">{r.headcount > 0 ? `${fmtK(r.annualCost)} p.a.` : "No staff"}</p>
+              {r.hireHeadcount > 0 && (
+                <p className="text-[9px] text-emerald-600 font-bold mt-0.5">+{r.hireHeadcount} confirmed hire{r.hireHeadcount > 1 ? "s" : ""}</p>
+              )}
+              <div className="h-1 bg-slate-100 rounded-full mt-2 overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{ width: `${(r.headcount / regionMaxHeadcount) * 100}%`, background: r.color }}/>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* ── Monthly Trend Chart ── */}
       <div className="bg-white rounded-xl border border-slate-100 p-5">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h3 className="text-sm font-bold text-slate-700">Monthly Payroll by Group</h3>
           <div className="flex gap-1">
-            {["FY26","FY27","FY28"].map(fy => (
-              <button key={fy} onClick={() => setActiveFY(fy)}
+            {FY_TABS.map(fy => (
+              <button key={fy} onClick={() => selectFY(fy)}
                 className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${activeFY===fy ? "bg-cyan-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
                 {fy}
               </button>
@@ -6965,7 +7044,7 @@ const GROUP_COLORS = {Analytics:"bg-blue-600", Planning:"bg-emerald-600", Source
 // (cashflow rolling 13-week view, P&L FY-tab view, modellers, audit logs etc.)
 // don't read those props, so the global controls are hidden there to avoid
 // showing buttons that look broken.
-const YEAR_AWARE_TABS = new Set(["dashboard", "regions", "expenses", "modeler", "staff", "crm", "data"]);
+const YEAR_AWARE_TABS = new Set(["dashboard", "regions", "expenses", "modeler", "staff", "crm", "data", "staffing"]);
 
 function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, selectedYear, setSelectedYear, availableYears, onReset, supaStatus, currentUser, onLogout}) {
   const groups = [...new Set(NAV.map(n=>n.group))];
@@ -7503,7 +7582,7 @@ export default function App() {
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
-      {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents}/></div>}
+      {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
