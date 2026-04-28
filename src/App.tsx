@@ -1899,8 +1899,7 @@ function calcStaffingRows(fy, filledHires = []) {
   return result;
 }
 
-function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, filledHires = [] }) {
-  const [activeFY, setActiveFY] = useState("FY26");
+function ExpensesView({ data, yearBasis = "financial", selectedYear = "All", setYearBasis, setSelectedYear, coaAdjustments, onUpdateCoa, onSaveCoa, saving, filledHires = [] }) {
   const [activeCell, setActiveCell] = useState(null);
   const [cellValue, setCellValue] = useState("");
   const [viewMode, setViewMode] = useState("forecast"); // "forecast" | "actuals"
@@ -1908,6 +1907,22 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
 
   const FY_TABS = ["FY26","FY27","FY28"];
   const FY_LABELS = { FY26:"FY 2025–26", FY27:"FY 2026–27", FY28:"FY 2027–28" };
+
+  // Derive activeFY from the global header selection.
+  // CY → FY ending in same calendar year (CY2025/26→FY26, CY2027→FY27, CY2028→FY28).
+  const activeFY = useMemo(() => {
+    if (yearBasis === "financial" && FY_TABS.includes(selectedYear)) return selectedYear;
+    if (yearBasis === "calendar") {
+      const cyToFY = { "2025":"FY26", "2026":"FY26", "2027":"FY27", "2028":"FY28" };
+      if (cyToFY[selectedYear]) return cyToFY[selectedYear];
+    }
+    return "FY26";
+  }, [yearBasis, selectedYear]);
+
+  const selectFY = (fy) => {
+    setYearBasis?.("financial");
+    setSelectedYear?.(fy);
+  };
 
   const fyMonths = useMemo(() => MONTH_SCHEDULE.filter(m => m.fy === activeFY), [activeFY]);
   const inflation = COST_INFLATION[activeFY] || 1;
@@ -2061,7 +2076,7 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="grid grid-cols-3 gap-4 flex-1">
           {fyTotals.map(({ fy, direct, overheads, total: t }) => (
-            <button key={fy} onClick={() => setActiveFY(fy)}
+            <button key={fy} onClick={() => selectFY(fy)}
               className={`rounded-xl p-4 border text-left transition-all ${activeFY===fy ? "bg-rose-600 text-white border-rose-600 shadow-lg" : "bg-white border-slate-200 hover:border-rose-300"}`}>
               <p className={`text-xs font-semibold mb-1 ${activeFY===fy?"text-rose-100":"text-slate-500"}`}>{FY_LABELS[fy]}</p>
               <p className={`text-2xl font-black ${activeFY===fy?"text-white":"text-slate-800"}`}>{fmtAUD(t)}</p>
@@ -2227,7 +2242,7 @@ function ExpensesView({ data, coaAdjustments, onUpdateCoa, onSaveCoa, saving, fi
             {/* FY tab switcher inside COA */}
             <div className="flex bg-slate-200 rounded-lg p-0.5">
               {FY_TABS.map(fy => (
-                <button key={fy} onClick={() => setActiveFY(fy)}
+                <button key={fy} onClick={() => selectFY(fy)}
                   className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${activeFY===fy?"bg-rose-600 text-white shadow":"text-slate-500 hover:text-slate-700"}`}>
                   {fy}
                 </button>
@@ -7027,7 +7042,7 @@ export default function App() {
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
       {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CashFlowForecastView data={data}/></div>}
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
-      {activeTab==="expenses"  && <ExpensesView {...props} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
+      {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
