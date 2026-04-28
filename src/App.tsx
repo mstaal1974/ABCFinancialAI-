@@ -395,7 +395,7 @@ function _regionAvgUnitValue(region) {
   return prices.length ? prices.reduce((s,p)=>s+p,0)/prices.length : 0;
 }
 
-function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}, peopleOverrides = {}, wageSettings = {}) {
+function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}, peopleOverrides = {}, wageSettings = {}, cpiSettings = {}) {
   // Build unit data across all 36 months
   const units = [];
   Object.entries(UNIT_ASSUMPTIONS_FY26).forEach(([region, courses]) => {
@@ -452,14 +452,22 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
 
   let balance = 850000;
   const CALC_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
+  // CPI is applied on top of COST_INFLATION to non-staff COA rows (Direct
+  // Costs + Overheads excl. wages/super/payroll-tax). Manual COA overrides
+  // are treated as authoritative — no CPI multiplier.
+  const cpiEffMoIdx = cpiSettings.effectiveMonth ? ALL_MONTH_LABELS.indexOf(cpiSettings.effectiveMonth) : -1;
   const opFin = MONTH_SCHEDULE.map(({ label, mk, fy }, i) => {
     const inflation = COST_INFLATION[fy] || 1;
+    const cpiPct = cpiSettings[fy.toLowerCase()] ?? 0;
+    const cpiMultiplier = 1 + (cpiPct / 100);
+    const cpiActive = cpiEffMoIdx < 0 || i >= cpiEffMoIdx;
     let pmt = Math.round(CHART_OF_ACCOUNTS
       .filter(ac => !CALC_ROWS.has(ac.account))
       .reduce((s, ac) => {
         const key = `${fy}|${ac.account}|${mk}`;
-        const v = coaAdjustments[key] !== undefined ? coaAdjustments[key] : Math.round((ac.months[mk] || 0) * inflation);
-        return s + v;
+        if (coaAdjustments[key] !== undefined) return s + coaAdjustments[key];
+        const baseline = Math.round((ac.months[mk] || 0) * inflation);
+        return s + (cpiActive ? Math.round(baseline * cpiMultiplier) : baseline);
       }, 0));
     // Add staffing: COA actuals as baseline + delta from peopleOverrides changes + wage increase multiplier
     // wageSettings: { fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }
@@ -5929,6 +5937,287 @@ function WageForecastPanel({ data, draftWage, appliedWage, onDraftChange, onAppl
   );
 }
 
+// ─── CPI INCREASE MODELLER ────────────────────────────────────────────────────
+// Models a CPI uplift on non-wage COA rows (Direct Costs + Overheads excluding
+// Gross Wages, Super, Payroll Tax). Applied multiplicatively on top of the
+// per-FY COST_INFLATION baseline. Manual COA cell overrides are treated as
+// authoritative and bypass the CPI multiplier.
+function CpiForecastPanel({ data, draftCpi, appliedCpi, onDraftChange, onApply, onClear }) {
+  const [applying, setApplying] = useState(false);
+  const fmtK   = v => v >= 1000000 ? `$${(v/1000000).toFixed(2)}M` : v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`;
+  const fmtAbs = v => `$${Math.abs(Math.round(v)).toLocaleString()}`;
+
+  const isApplied = appliedCpi.fy26 > 0 || appliedCpi.fy27 > 0 || appliedCpi.fy28 > 0;
+  const draftDiffersFromApplied =
+    draftCpi.fy26 !== appliedCpi.fy26 ||
+    draftCpi.fy27 !== appliedCpi.fy27 ||
+    draftCpi.fy28 !== appliedCpi.fy28 ||
+    draftCpi.effectiveMonth !== appliedCpi.effectiveMonth;
+
+  const STAFF_ROWS = new Set(["Gross Wages (IncPAYG)","Superannuation","Payroll Tax"]);
+  // Per-FY extra cost from a CPI setting (applies to non-staff COA rows only).
+  const calcImpact = (cpi) => {
+    const FYS = ["FY26","FY27","FY28"];
+    return FYS.map(fy => {
+      const pct  = cpi[fy.toLowerCase()] || 0;
+      const mult = 1 + pct / 100;
+      const inflation = COST_INFLATION[fy] || 1;
+      const months = MONTH_SCHEDULE.filter(m => m.fy === fy);
+      const effectiveMoIdx = cpi.effectiveMonth ? ALL_MONTH_LABELS.indexOf(cpi.effectiveMonth) : -1;
+      let annualBase = 0, annualWithIncrease = 0;
+      months.forEach(({ mk, label }) => {
+        const globalIdx = ALL_MONTH_LABELS.indexOf(label);
+        const active = effectiveMoIdx < 0 || globalIdx >= effectiveMoIdx;
+        const base = CHART_OF_ACCOUNTS
+          .filter(ac => !STAFF_ROWS.has(ac.account))
+          .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
+        annualBase += base;
+        annualWithIncrease += active ? Math.round(base * mult) : base;
+      });
+      return { fy, pct, extra: annualWithIncrease - annualBase };
+    });
+  };
+
+  const draftImpact   = useMemo(() => calcImpact(draftCpi),   [draftCpi]);
+  const appliedImpact = useMemo(() => calcImpact(appliedCpi), [appliedCpi]);
+  const draftTotalExtra   = draftImpact.reduce((s, x) => s + x.extra, 0);
+  const appliedTotalExtra = appliedImpact.reduce((s, x) => s + x.extra, 0);
+
+  // Chart: monthly non-staff cost — baseline vs draft vs applied
+  const chartData = useMemo(() => {
+    return MONTH_SCHEDULE.slice(0,36).map(({ label, mk, fy }, i) => {
+      const inflation = COST_INFLATION[fy] || 1;
+      const base = CHART_OF_ACCOUNTS
+        .filter(ac => !STAFF_ROWS.has(ac.account))
+        .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
+      const draftPct   = draftCpi[fy.toLowerCase()]   || 0;
+      const appliedPct = appliedCpi[fy.toLowerCase()] || 0;
+      const effIdx = ALL_MONTH_LABELS.indexOf(draftCpi.effectiveMonth || "Jul-26");
+      const active = effIdx < 0 || i >= effIdx;
+      return {
+        month: label, fy,
+        baseline: base,
+        draft:    active ? Math.round(base * (1 + draftPct/100))   : base,
+        applied:  active ? Math.round(base * (1 + appliedPct/100)) : base,
+      };
+    });
+  }, [draftCpi, appliedCpi]);
+
+  const fyLabels = { FY26:"FY 2025–26", FY27:"FY 2026–27", FY28:"FY 2027–28" };
+  const fyColors = { FY26:"#0d9488",    FY27:"#0891b2",    FY28:"#0284c7" };
+
+  const handleApply = async () => {
+    setApplying(true);
+    await onApply(draftCpi);
+    setApplying(false);
+  };
+
+  const handleClear = async () => {
+    setApplying(true);
+    await onClear();
+    onDraftChange({ fy26: 0, fy27: 0, fy28: 0, effectiveMonth: draftCpi.effectiveMonth });
+    setApplying(false);
+  };
+
+  const SliderInput = ({ label, fyKey, color }) => {
+    const val = draftCpi[fyKey] || 0;
+    const appliedVal = appliedCpi[fyKey] || 0;
+    const changed = val !== appliedVal;
+    return (
+      <div className={`rounded-xl border-2 p-4 transition-all ${changed ? "border-teal-300 bg-teal-50/40" : "border-slate-200 bg-white"}`}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs font-bold text-slate-700">{label}</span>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number" min={0} max={20} step={0.1}
+              value={val}
+              onChange={e => onDraftChange({ ...draftCpi, [fyKey]: parseFloat(e.target.value) || 0 })}
+              className="w-16 text-right px-2 py-1 text-sm font-black border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-400 outline-none"
+              style={{ color }}
+            />
+            <span className="text-sm font-bold text-slate-500">%</span>
+          </div>
+        </div>
+        <input
+          type="range" min={0} max={15} step={0.1}
+          value={val}
+          onChange={e => onDraftChange({ ...draftCpi, [fyKey]: parseFloat(e.target.value) })}
+          className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+          style={{ accentColor: color }}
+        />
+        <div className="flex items-center justify-between mt-1.5 text-[9px]">
+          <span className="text-slate-300">0% ——— 15%</span>
+          {changed && (
+            <span className="text-teal-600 font-semibold">
+              draft: {val}% · applied: {appliedVal}%
+            </span>
+          )}
+          {!changed && val > 0 && (
+            <span style={{ color }}>+{fmtAbs(draftImpact.find(x=>x.fy===fyKey.replace('fy','FY').toUpperCase())?.extra || 0)}/yr</span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-white rounded-xl border-2 border-teal-100 overflow-hidden shadow-sm">
+
+      <div className="bg-gradient-to-r from-teal-600 to-cyan-600 px-5 py-4">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <TrendUp size={16} className="text-teal-200"/>
+              CPI Increase Modeller
+            </h3>
+            <p className="text-[10px] text-teal-200 mt-0.5">
+              Lifts non-wage COA rows (Direct Costs + Overheads). Click Apply to commit to Overview, Cashflow, P&L and Audit Log
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {isApplied && (
+              <div className="bg-emerald-500 rounded-xl px-3 py-1.5 flex items-center gap-1.5">
+                <CheckCircle size={12} className="text-white"/>
+                <span className="text-[10px] font-bold text-white">
+                  APPLIED — FY26:{appliedCpi.fy26}% FY27:{appliedCpi.fy27}% FY28:{appliedCpi.fy28}% from {appliedCpi.effectiveMonth}
+                </span>
+              </div>
+            )}
+            {appliedTotalExtra > 0 && (
+              <div className="bg-white/15 rounded-xl px-3 py-1.5 text-center">
+                <p className="text-[9px] text-teal-200">Active extra cost (3yr)</p>
+                <p className="text-sm font-black text-white">{fmtAbs(appliedTotalExtra)}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="p-5 space-y-5">
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <SliderInput label="FY 2025–26" fyKey="fy26" color="#0d9488"/>
+          <SliderInput label="FY 2026–27" fyKey="fy27" color="#0891b2"/>
+          <SliderInput label="FY 2027–28" fyKey="fy28" color="#0284c7"/>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="text-xs font-semibold text-slate-600 shrink-0">Effective from:</label>
+          <select
+            value={draftCpi.effectiveMonth || "Jul-26"}
+            onChange={e => onDraftChange({ ...draftCpi, effectiveMonth: e.target.value })}
+            className="px-3 py-1.5 border border-slate-300 rounded-lg text-xs font-medium bg-white focus:ring-2 focus:ring-teal-400 outline-none"
+          >
+            {ALL_MONTH_LABELS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+
+          <button
+            onClick={handleApply}
+            disabled={applying || !draftDiffersFromApplied}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              draftDiffersFromApplied
+                ? "bg-teal-600 hover:bg-teal-700 text-white shadow-md shadow-teal-200"
+                : "bg-slate-100 text-slate-400 cursor-not-allowed"
+            }`}
+          >
+            {applying
+              ? <><Loader2 size={12} className="animate-spin"/>Applying…</>
+              : <><CheckCircle size={12}/>Apply to Forecasts</>}
+          </button>
+
+          {isApplied && (
+            <button
+              onClick={handleClear}
+              disabled={applying}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 border border-rose-200 hover:bg-rose-50 transition-colors"
+            >
+              <XCircle size={12}/>Clear Applied
+            </button>
+          )}
+
+          <button
+            onClick={() => onDraftChange({ fy26: 0, fy27: 3, fy28: 3, effectiveMonth: "Jul-26" })}
+            className="ml-auto text-[10px] text-slate-400 hover:text-slate-600 px-2 py-1 rounded border border-slate-200 transition-colors"
+          >Reset draft</button>
+        </div>
+
+        {draftDiffersFromApplied && (draftCpi.fy26 > 0 || draftCpi.fy27 > 0 || draftCpi.fy28 > 0) && (
+          <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3 flex items-start gap-3">
+            <AlertTriangle size={14} className="text-teal-500 shrink-0 mt-0.5"/>
+            <div className="text-xs text-teal-800">
+              <span className="font-bold">Draft not yet applied — </span>
+              the chart and FY summaries below show the <span className="font-bold">currently applied</span> settings.
+              {" "}Draft adds <span className="font-bold">{fmtAbs(draftTotalExtra)}</span> over 3 years.
+            </div>
+          </div>
+        )}
+
+        <div>
+          <h4 className="text-xs font-bold text-slate-700 mb-1">Monthly Non-Wage Cost Comparison</h4>
+          <p className="text-[10px] text-slate-400 mb-3">Baseline · Applied (flows to Overview) · Draft (modelling only)</p>
+          <div className="h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 4, right: 8, left: 8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9"/>
+                <XAxis dataKey="month" fontSize={8} tickLine={false} axisLine={false} tick={{ fill:"#94a3b8" }} interval={2}/>
+                <YAxis tickFormatter={v => `$${Math.round(v/1000)}k`} fontSize={8} tickLine={false} axisLine={false} tick={{ fill:"#94a3b8" }} width={42}/>
+                <Tooltip contentStyle={{ fontSize:11, borderRadius:8, border:"1px solid #e2e8f0" }}
+                  formatter={(v, name) => [`$${Math.round(v).toLocaleString()}`, name]}/>
+                <Legend iconType="circle" iconSize={7} wrapperStyle={{ fontSize:10 }}/>
+                <Area type="monotone" dataKey="baseline" name="Baseline (Xero)" fill="#e2e8f0" stroke="#94a3b8" strokeWidth={1} fillOpacity={0.5}/>
+                <Line type="monotone" dataKey="applied"  name="Applied (live)" stroke="#0d9488" strokeWidth={2.5} dot={false}/>
+                <Line type="monotone" dataKey="draft"    name="Draft (preview)" stroke="#0284c7" strokeWidth={1.5} dot={false} strokeDasharray="5 3"/>
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {["FY26","FY27","FY28"].map((fy, i) => {
+            const ai = appliedImpact[i];
+            const di = draftImpact[i];
+            return (
+              <div key={fy} className="rounded-xl border border-slate-100 p-4 bg-slate-50">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-slate-700">{fyLabels[fy]}</span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                    style={{ background: fyColors[fy]+"22", color: fyColors[fy] }}>
+                    applied: +{ai.pct}%
+                  </span>
+                </div>
+                <div className="space-y-1 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Extra non-wage cost</span>
+                    <span className="font-semibold text-amber-600">{ai.extra > 0 ? `+${fmtK(ai.extra)}` : "—"}</span>
+                  </div>
+                  {di.pct !== ai.pct && (
+                    <div className="flex justify-between text-teal-600">
+                      <span>Draft extra cost</span>
+                      <span className="font-semibold">{di.extra > 0 ? `+${fmtK(di.extra)}` : "—"}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {isApplied && appliedTotalExtra > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3">
+            <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5"/>
+            <div className="text-xs text-amber-800">
+              <span className="font-bold">Applied CPI increase: </span>
+              FY26 {appliedCpi.fy26}% · FY27 {appliedCpi.fy27}% · FY28 {appliedCpi.fy28}% — effective {appliedCpi.effectiveMonth}.
+              {" "}Total 3-year extra cost: <span className="font-bold">{fmtAbs(appliedTotalExtra)}</span>.
+              {" "}Reflected in Overview, Cashflow, Expenses and P&L. Recorded in Audit Log.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function CashFlowForecastView({ data }) {
   const [cashOverrides, setCashOverrides] = useState({});
@@ -6797,6 +7086,9 @@ export default function App() {
   const NULL_WAGE = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: "Jul-26" };
   const [appliedWage, setAppliedWage] = useState(NULL_WAGE);   // committed — flows into data/cashflow
   const [draftWage,   setDraftWage]   = useState({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }); // modelling only
+  const NULL_CPI = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: "Jul-26" };
+  const [appliedCpi, setAppliedCpi] = useState(NULL_CPI);
+  const [draftCpi,   setDraftCpi]   = useState({ fy26: 0, fy27: 3, fy28: 3, effectiveMonth: "Jul-26" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [supaStatus, setSupaStatus] = useState("connecting");
@@ -6871,6 +7163,14 @@ export default function App() {
           const savedWage = localStorage.getItem("applied_wage_settings");
           if (savedWage) { try { const w = JSON.parse(savedWage); setAppliedWage(w); setDraftWage(w); } catch {} }
         }
+        // Load applied CPI settings (same pattern as wage)
+        const cpiRow = coaData?.find ? coaData.find(r => r.key === "__cpi_settings__") : null;
+        if (cpiRow?.value) {
+          try { const c = JSON.parse(cpiRow.value); setAppliedCpi(c); setDraftCpi(c); console.log("✓ Loaded CPI settings from Supabase:", c); } catch {}
+        } else {
+          const savedCpi = localStorage.getItem("applied_cpi_settings");
+          if (savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
+        }
         setSupaStatus("connected");
       } catch(e) {
         console.warn("Supabase load failed, using localStorage fallback:", e);
@@ -6886,6 +7186,8 @@ export default function App() {
           if(savedPeople) setPeopleOverrides(JSON.parse(savedPeople));
           const savedWage = localStorage.getItem("applied_wage_settings");
           if(savedWage) { try { const w = JSON.parse(savedWage); setAppliedWage(w); setDraftWage(w); } catch {} }
+          const savedCpi = localStorage.getItem("applied_cpi_settings");
+          if(savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
         } catch {}
       }
       setLoading(false);
@@ -6895,7 +7197,7 @@ export default function App() {
 
   // Filled hires are treated as committed — they feed into the true cost/revenue position
   const filledHires = useMemo(() => hiringEvents.filter(ev => ev.filled), [hiringEvents]);
-  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage]);
+  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi]);
 
   const availableYears = useMemo(() => {
     const s = new Set();
@@ -7112,6 +7414,38 @@ export default function App() {
     } catch(e) { console.warn("Wage clear remote sync failed:", e); }
   };
 
+  // ── CPI increase: apply + clear (mirrors wage handlers) ───────────────────
+  const handleApplyCpi = async (draft) => {
+    const prev = { ...appliedCpi };
+    setAppliedCpi(draft);
+    localStorage.setItem("applied_cpi_settings", JSON.stringify(draft));
+    try {
+      await sbUpsert("coa_adjustments", [{ key: "__cpi_settings__", value: JSON.stringify(draft) }]);
+      await sbAudit(currentUser, "UPDATE", "CPI",
+        `CPI increase applied — FY26: ${draft.fy26}%, FY27: ${draft.fy27}%, FY28: ${draft.fy28}%, effective from ${draft.effectiveMonth}`,
+        prev,
+        draft
+      );
+    } catch(e) {
+      console.warn("CPI settings remote sync failed (kept locally):", e);
+    }
+  };
+
+  const handleClearCpi = async () => {
+    const prev = { ...appliedCpi };
+    const cleared = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: appliedCpi.effectiveMonth };
+    setAppliedCpi(cleared);
+    localStorage.setItem("applied_cpi_settings", JSON.stringify(cleared));
+    try {
+      await sbDelete("coa_adjustments", { key: "__cpi_settings__" });
+      await sbAudit(currentUser, "DELETE", "CPI",
+        `CPI increase cleared (reset to 0%)`,
+        prev,
+        cleared
+      );
+    } catch(e) { console.warn("CPI clear remote sync failed:", e); }
+  };
+
     const handleReset = () => {
     if(confirm("Reset all data? This will clear your adjustments and hiring plan.")) {
       sbAudit(currentUser, "DELETE", "UNIT", "Reset all unit + COA + hiring data");
@@ -7150,6 +7484,7 @@ export default function App() {
 
   const props = {data, yearBasis, selectedYear};
   const wageProps = { draftWage, appliedWage, onDraftChange: setDraftWage, onApply: handleApplyWage, onClear: handleClearWage, peopleOverrides };
+  const cpiProps  = { draftCpi,  appliedCpi,  onDraftChange: setDraftCpi,  onApply: handleApplyCpi,  onClear: handleClearCpi  };
 
   return (
     <Layout
@@ -7164,7 +7499,7 @@ export default function App() {
     >
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
-      {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CashFlowForecastView data={data}/></div>}
+      {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><CashFlowForecastView data={data}/></div>}
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
