@@ -387,11 +387,25 @@ function _getSalesUnits(mo) {
   if (mo < 3) return 0;  // cliff
   return 21 * (mo - 3 + 1); // month 4 (mo=3, 0-indexed) → 21; month 5 → 42; etc.
 }
-function _regionAvgUnitValue(region) {
+// Trainer specialisation. Drives which course family contributes to a
+// trainer's projected unit value.
+//   MSL → MSL30122 / MSL40122 / MSL50122 (excl. MSL20122)
+//   HLT → HLT37215
+//   EP  → all sellable courses, priced from the EP region
+const TRAINER_TYPES = ["MSL", "HLT", "EP"];
+
+function _regionAvgUnitValue(region, trainerType) {
   const EXCL = new Set(["MSL20122","FFS"]);
-  const courses = UNIT_ASSUMPTIONS_FY26[region];
+  const targetRegion = trainerType === "EP" ? "EP" : region;
+  const courses = UNIT_ASSUMPTIONS_FY26[targetRegion];
   if(!courses) return 0;
-  const prices = Object.entries(courses).filter(([c])=>!EXCL.has(c)).map(([,v])=>v.price);
+  const filt =
+    trainerType === "MSL" ? c => c.startsWith("MSL") :
+    trainerType === "HLT" ? c => c.startsWith("HLT") :
+    () => true;
+  const prices = Object.entries(courses)
+    .filter(([c, v]) => !EXCL.has(c) && v.price > 0 && filt(c))
+    .map(([,v]) => v.price);
   return prices.length ? prices.reduce((s,p)=>s+p,0)/prices.length : 0;
 }
 
@@ -439,7 +453,7 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
     ...ev,
     si: ALL_MONTH_LABELS.indexOf(ev.startMonth),
     count: Number(ev.count),
-    uv: _regionAvgUnitValue(ev.region),
+    uv: _regionAvgUnitValue(ev.region, ev.trainerType),
     eventType: ev.eventType || "hire",
   })).filter(ev => ev.si !== -1);
 
@@ -606,7 +620,7 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], appl
       ...ev,
       si: allMonths.indexOf(ev.startMonth),
       count: Number(ev.count),
-      uv: _regionAvgUnitValue(ev.region),
+      uv: _regionAvgUnitValue(ev.region, ev.trainerType),
     })).filter(ev => ev.si !== -1);
 
     let projBal = null;
@@ -1202,6 +1216,7 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   const [count, setCount] = useState(1);
   const [startMonth, setStartMonth] = useState(months[0]||"");
   const [region, setRegion] = useState(regions[0]||"");
+  const [trainerType, setTrainerType] = useState("MSL"); // only meaningful when role==="trainer"
   const [aStart, setAStart] = useState(months[0]||"");
   const [aEnd, setAEnd] = useState(months[months.length-1]||"");
 
@@ -1291,7 +1306,9 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
           let uPP = 0;
           if (ev.roleId === "trainer") uPP = getTrainerUnits(ma);
           else if (ev.roleId === "sales") uPP = getSalesUnits(ma);
-          const uv = regionUnitValues.get(ev.region) || 0;
+          const uv = ev.roleId === "trainer" && ev.trainerType
+            ? _regionAvgUnitValue(ev.region, ev.trainerType)
+            : (regionUnitValues.get(ev.region) || 0);
           const mRev = uPP * ev.count * uv;
 
           if (ev.isDeparture) {
@@ -1349,10 +1366,12 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   const [lastRoiKey, setLastRoiKey] = useState("");   // tracks which hire was analysed
 
   // Compute deterministic ROI numbers for the selected hire config
-  const computeRoiNumbers = (roleId, regionId, numCount, startMo) => {
+  const computeRoiNumbers = (roleId, regionId, numCount, startMo, ttype) => {
     const roleObj = STAFF_ROLES.find(r => r.id === roleId);
     if (!roleObj) return null;
-    const uv = regionUnitValues.get(regionId) || 471;
+    const uv = roleId === "trainer" && ttype
+      ? _regionAvgUnitValue(regionId, ttype) || 471
+      : (regionUnitValues.get(regionId) || 471);
     const monthlyCost = getMonthlyCost(roleId) * numCount;
     const startIdx = months.indexOf(startMo);
     if (startIdx === -1) return null;
@@ -1403,23 +1422,24 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
       startMonth,
       region,
       eventType,
+      ...(role === "trainer" ? { trainerType } : {}),
     };
     setHiringEvents(prev => [...prev, newEvent]);
 
     // Trigger AI ROI analysis for hires only
     if (eventType === "hire") {
-      const roiKey = `${role}-${region}-${count}-${startMonth}`;
+      const roiKey = `${role}-${region}-${count}-${startMonth}-${role==="trainer"?trainerType:""}`;
       if (roiKey !== lastRoiKey) {
         setLastRoiKey(roiKey);
-        runRoiAnalysis(role, region, Math.max(1, Number(count)), startMonth);
+        runRoiAnalysis(role, region, Math.max(1, Number(count)), startMonth, role === "trainer" ? trainerType : null);
       }
     }
   };
 
-  const runRoiAnalysis = async (roleId, regionId, numCount, startMo) => {
+  const runRoiAnalysis = async (roleId, regionId, numCount, startMo, ttype = null) => {
     setRoiLoading(true);
     setRoiResult(null);
-    const numbers = computeRoiNumbers(roleId, regionId, numCount, startMo);
+    const numbers = computeRoiNumbers(roleId, regionId, numCount, startMo, ttype);
     if (!numbers) { setRoiLoading(false); return; }
 
     try {
@@ -1508,6 +1528,24 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
                   {STAFF_ROLES.map(r=><option key={r.id} value={r.id}>{r.label} ({fmtAUD(r.baseWage,false)})</option>)}
                 </select>
               </div>
+              {role === "trainer" && (
+                <div>
+                  <label className="text-xs font-medium text-slate-500 mb-1 block">Trainer Type</label>
+                  <div className="flex bg-slate-100 p-0.5 rounded-lg">
+                    {TRAINER_TYPES.map(t => (
+                      <button key={t} type="button" onClick={() => setTrainerType(t)}
+                        className={`flex-1 py-1.5 rounded-md text-xs font-semibold transition-all ${trainerType===t ? "bg-indigo-600 text-white shadow" : "text-slate-500 hover:text-slate-700"}`}>
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    {trainerType === "MSL" && "Manufacturing/Skills (MSL30122/40122/50122)"}
+                    {trainerType === "HLT" && "Health (HLT37215)"}
+                    {trainerType === "EP"  && "Education Pathways (EP region pricing)"}
+                  </p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium text-slate-500 mb-1 block">Region</label>
@@ -1746,6 +1784,9 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
                               {isDep ? "↓ Departure" : "↑ Hire"}
                             </span>
                             <span className="font-bold text-slate-800 text-xs">{ev.count}× {r?.label}</span>
+                            {ev.roleId === "trainer" && ev.trainerType && (
+                              <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-semibold">{ev.trainerType}</span>
+                            )}
                             <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded text-slate-600">{ev.region}</span>
                             {isFilled
                               ? <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${isDep?"bg-red-100 text-red-700":"bg-emerald-100 text-emerald-700"}`}>
@@ -7207,7 +7248,18 @@ export default function App() {
 
         const hireData = await sbGet("hiring_plan");
         if (hireData && Array.isArray(hireData) && hireData.length > 0) {
-          setHiringEvents(hireData.map(r => ({id:r.id||Math.random().toString(36).slice(2), roleId:r.role_id, count:r.count, startMonth:r.start_month, region:r.region, filled:!!r.filled, eventType:r.event_type||"hire"})));
+          // Merge in trainerType from localStorage — the Supabase schema
+          // doesn't carry it, but the full event JSON in localStorage does.
+          let lsExtras = {};
+          try {
+            const ls = JSON.parse(localStorage.getItem("staff_hiring_plan") || "[]");
+            lsExtras = Object.fromEntries(ls.filter(e => e.id && e.trainerType).map(e => [e.id, e.trainerType]));
+          } catch {}
+          setHiringEvents(hireData.map(r => {
+            const ev = {id:r.id||Math.random().toString(36).slice(2), roleId:r.role_id, count:r.count, startMonth:r.start_month, region:r.region, filled:!!r.filled, eventType:r.event_type||"hire"};
+            if (ev.roleId === "trainer" && lsExtras[ev.id]) ev.trainerType = lsExtras[ev.id];
+            return ev;
+          }));
         } else {
           const savedHires = localStorage.getItem("staff_hiring_plan");
           if (savedHires) setHiringEvents(JSON.parse(savedHires));
