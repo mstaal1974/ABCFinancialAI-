@@ -5427,85 +5427,175 @@ const SCHEDULED_PAYMENTS = [
   { id: "payroll_tax", label: "Payroll Tax (state)",    color: "#f97316", dayOfMonth: 7,  biweekly: false, monthly: true  },
 ];
 
-// Build 13 weeks of data from a start date + monthly model data
-function build13WeekForecast(operationalFinancials, startingBalance, cashOverrides = {}) {
-  // Start from Mar-26 (week of Mar 2, 2026)
-  const START = new Date(2026, 2, 2); // Mar 2 2026
-  const weeks = [];
+// Build 13 weeks of data from a start date + monthly model data.
+//
+// Distribution rule: for every calendar month touched by the 13-week window,
+// take the share of the monthly figure that corresponds to (#weeks of that
+// month inside the window) / (#Monday-starting weeks in that month). That
+// fractional monthly amount is then re-distributed across the in-window weeks
+// using a normalized spike pattern that always sums to 1, so the per-month
+// total inside the window is exactly preserved. Net effect: end-of-13-week
+// balance = startingBalance + Σ over months of (revenue − payments) ×
+// (#in-window weeks of month / #weeks of month).
+function _next13WeekStart(now = new Date()) {
+  // Roll forward to the upcoming Monday (today if today is Monday).
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  const dow = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+  const offset = dow === 1 ? 0 : (dow === 0 ? 1 : 8 - dow);
+  d.setDate(d.getDate() + offset);
+  return d;
+}
 
-  // Get monthly revenue/payment data indexed by "Mon-YY"
-  const monthlyMap = {};
-  operationalFinancials.forEach(op => { monthlyMap[op.month] = op; });
+const REV_STREAM_SHARE = {
+  qld: 0.45, nsw: 0.22, nt: 0.07, tas: 0.04, sa: 0.05, ep: 0.10, ffs: 0.07,
+};
 
-  // Helper: which month label does a date fall in?
+function build13WeekForecast(operationalFinancials, startingBalance, cashOverrides = {}, today = new Date()) {
+  const START = _next13WeekStart(today);
   const MO_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const monthLabel = d => `${MO_SHORT[d.getMonth()]}-${String(d.getFullYear()).slice(2)}`;
 
+  const monthlyMap = {};
+  operationalFinancials.forEach(op => { monthlyMap[op.month] = op; });
+
+  // Pre-compute week starts.
+  const weekStarts = Array.from({ length: 13 }, (_, w) => {
+    const ws = new Date(START);
+    ws.setDate(START.getDate() + w * 7);
+    return ws;
+  });
+
+  // Group weeks by their month label.
+  const weeksByMonth = {};
+  weekStarts.forEach((ws, i) => {
+    const m = monthLabel(ws);
+    (weeksByMonth[m] ??= []).push(i);
+  });
+
+  // Count Monday-starts in a calendar month (used to scale the monthly figure
+  // by the in-window week share).
+  const mondaysInMonth = (yr, mo) => {
+    const last = new Date(yr, mo + 1, 0).getDate();
+    let n = 0;
+    for (let d = 1; d <= last; d++) if (new Date(yr, mo, d).getDay() === 1) n++;
+    return n;
+  };
+
+  // Allocate a per-month total across that month's in-window weeks, picking a
+  // single spike week (where day-of-month falls in [lo, hi]) that gets
+  // `spikeShare` of the total; the remaining weeks split the rest evenly.
+  // If no week of the month falls in the spike window, distribute evenly.
+  const allocateWithSpike = (idxs, total, lo, hi, spikeShare = 0.6) => {
+    if (idxs.length === 0 || total === 0) return idxs.map(() => 0);
+    if (idxs.length === 1) return [total];
+    const spikeIdxLocal = idxs.findIndex(i => {
+      const d = weekStarts[i].getDate();
+      return d >= lo && d <= hi;
+    });
+    if (spikeIdxLocal < 0) return idxs.map(() => total / idxs.length);
+    const nonSpike = (total * (1 - spikeShare)) / (idxs.length - 1);
+    return idxs.map((_, k) => k === spikeIdxLocal ? total * spikeShare : nonSpike);
+  };
+
+  const weeklyByStream = weekStarts.map(() => ({ qld:0, nsw:0, nt:0, tas:0, sa:0, ep:0, ffs:0 }));
+  const weeklyPay = weekStarts.map(() => ({ payroll:0, rent:0, super:0, overheads:0 }));
+
+  Object.entries(weeksByMonth).forEach(([mLabel, idxs]) => {
+    const op = monthlyMap[mLabel] || { revenue: 0, payments: 0 };
+    const ws0 = weekStarts[idxs[0]];
+    const totalMondays = Math.max(1, mondaysInMonth(ws0.getFullYear(), ws0.getMonth()));
+    const fraction = idxs.length / totalMondays; // share of monthly amount realized in-window
+
+    const realizedRev = (op.revenue  || 0) * fraction;
+    const realizedPmt = (op.payments || 0) * fraction;
+
+    // Government claim cycles — spike windows by stream.
+    const SPIKES = {
+      qld: [13, 19], nsw: [1, 7], nt: [18, 24], ep: [18, 24], sa: [8, 14],
+    };
+    Object.entries(REV_STREAM_SHARE).forEach(([stream, share]) => {
+      const streamTotal = realizedRev * share;
+      const spikeWindow = SPIKES[stream];
+      const alloc = spikeWindow
+        ? allocateWithSpike(idxs, streamTotal, spikeWindow[0], spikeWindow[1])
+        : idxs.map(() => streamTotal / idxs.length); // tas, ffs — smooth
+      idxs.forEach((wi, k) => { weeklyByStream[wi][stream] += alloc[k]; });
+    });
+
+    // Payments: split monthlyPmt into payroll (~56%) and overheads remainder
+    // after carving out fixed scheduled items (rent, quarterly super).
+    const RENT_MONTHLY  = 19194;
+    const SUPER_QUARTERLY_AMT = 38000;
+    const isQuarterEnd = ws0.getMonth() % 3 === 2; // Mar/Jun/Sep/Dec
+    const rentScaled  = RENT_MONTHLY * fraction;
+    const superScaled = isQuarterEnd ? SUPER_QUARTERLY_AMT * fraction : 0;
+
+    // Find a week in-window for the rent (1–7) and super (≥26) anchor dates.
+    const rentLocal = idxs.findIndex(i => { const d = weekStarts[i].getDate(); return d >= 1 && d <= 7; });
+    if (rentLocal >= 0) weeklyPay[idxs[rentLocal]].rent += rentScaled;
+    else if (idxs.length) weeklyPay[idxs[0]].rent += rentScaled;
+    if (superScaled > 0) {
+      const superLocal = idxs.findIndex(i => weekStarts[i].getDate() >= 26);
+      if (superLocal >= 0) weeklyPay[idxs[superLocal]].super += superScaled;
+      else weeklyPay[idxs[idxs.length-1]].super += superScaled;
+    }
+
+    const remainingPmt = Math.max(0, realizedPmt - rentScaled - superScaled);
+    const payrollTotal   = remainingPmt * (0.56 / (0.56 + 0.44));
+    const overheadsTotal = remainingPmt - payrollTotal;
+
+    // Payroll has fortnightly spikes; distribute via two anchor windows.
+    const payrollAlloc = idxs.length === 1
+      ? [payrollTotal]
+      : (() => {
+          // Fortnightly: anchor weeks where day falls in 12–16 or 26–30.
+          const anchors = idxs.map((i, k) => {
+            const d = weekStarts[i].getDate();
+            return ((d >= 12 && d <= 16) || (d >= 26 && d <= 30)) ? k : -1;
+          }).filter(k => k >= 0);
+          if (anchors.length === 0) return idxs.map(() => payrollTotal / idxs.length);
+          const perAnchor = payrollTotal / anchors.length;
+          return idxs.map((_, k) => anchors.includes(k) ? perAnchor : 0);
+        })();
+    payrollAlloc.forEach((v, k) => { weeklyPay[idxs[k]].payroll += v; });
+    idxs.forEach(wi => { weeklyPay[wi].overheads += overheadsTotal / idxs.length; });
+  });
+
   let balance = startingBalance;
-
-  for (let w = 0; w < 13; w++) {
-    const weekStart = new Date(START);
-    weekStart.setDate(START.getDate() + w * 7);
-    const weekEnd   = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 6);
-
-    const wLabel = `W${w+1} ${weekStart.getDate()} ${MO_SHORT[weekStart.getMonth()]}`;
-    const wKey   = `week_${w}`;
-    const mLabel = monthLabel(weekStart);
-    const op     = monthlyMap[mLabel] || { payments: 0 };
-
-    // Revenue receipts this week (government cycles)
-    // Split: QLD 50%, NSW 22%, NT 7%, TAS 4%, EP 10%, FFS 7%
-    const qldWeekly = (op && op.revenue) ? op.revenue * 0.50 / 4 : 41000;
-    const nswWeekly = (op && op.revenue) ? op.revenue * 0.22 / 4 : 16000;
-    const ntWeekly  = (op && op.revenue) ? op.revenue * 0.07 / 4 : 4800;
-    const tasWeekly = (op && op.revenue) ? op.revenue * 0.04 / 4 : 2800;
-    const epWeekly  = (op && op.revenue) ? op.revenue * 0.10 / 4 : 7000;
-    const ffsWeekly = (op && op.revenue) ? op.revenue * 0.07 / 4 : 4800;
-
-    // Spike claims on government payment days
-    const dayInMonth = weekStart.getDate();
-    const qldSpike  = (dayInMonth >= 13 && dayInMonth <= 19) ? qldWeekly * 2.2 : qldWeekly * 0.6;
-    const nswSpike  = (dayInMonth >= 1  && dayInMonth <= 7)  ? nswWeekly * 2.8 : nswWeekly * 0.4;
-    const ntSpike   = (dayInMonth >= 18 && dayInMonth <= 24) ? ntWeekly  * 2.5 : ntWeekly  * 0.5;
-    const epSpike   = (dayInMonth >= 18 && dayInMonth <= 24) ? epWeekly  * 2.2 : epWeekly  * 0.6;
+  return weekStarts.map((ws, w) => {
+    const wKey  = `week_${w}`;
+    const wLabel = `W${w+1} ${ws.getDate()} ${MO_SHORT[ws.getMonth()]}`;
+    const mLabel = monthLabel(ws);
+    const stream = weeklyByStream[w];
+    const pay    = weeklyPay[w];
 
     const receipts = {
-      qld_skills:  Math.round(cashOverrides[`${wKey}_qld`]  ?? qldSpike),
-      nsw_skills:  Math.round(cashOverrides[`${wKey}_nsw`]  ?? nswSpike),
-      nt_training: Math.round(cashOverrides[`${wKey}_nt`]   ?? ntSpike),
-      tas_sgs:     Math.round(cashOverrides[`${wKey}_tas`]  ?? tasWeekly),
-      ep_pathways: Math.round(cashOverrides[`${wKey}_ep`]   ?? epSpike),
-      fee_for_svc: Math.round(cashOverrides[`${wKey}_ffs`]  ?? ffsWeekly),
+      qld_skills:  Math.round(cashOverrides[`${wKey}_qld`]  ?? stream.qld),
+      nsw_skills:  Math.round(cashOverrides[`${wKey}_nsw`]  ?? stream.nsw),
+      nt_training: Math.round(cashOverrides[`${wKey}_nt`]   ?? stream.nt),
+      tas_sgs:     Math.round(cashOverrides[`${wKey}_tas`]  ?? stream.tas),
+      sa_skills:   Math.round(cashOverrides[`${wKey}_sa`]   ?? stream.sa),
+      ep_pathways: Math.round(cashOverrides[`${wKey}_ep`]   ?? stream.ep),
+      fee_for_svc: Math.round(cashOverrides[`${wKey}_ffs`]  ?? stream.ffs),
     };
     const totalReceipts = Object.values(receipts).reduce((s,v) => s+v, 0);
 
-    // Outgoings this week
-    const weeklyPayroll   = (op.payments || 0) * 0.56 / 4; // wages = ~56% of payments
-    const weeklyOverheads = (op.payments || 0) * 0.44 / 4;
-    // Payroll spikes on fortnightly dates
-    const payrollSpike  = (dayInMonth >= 12 && dayInMonth <= 16) || (dayInMonth >= 26 && dayInMonth <= 30)
-      ? weeklyPayroll * 2.0 : weeklyPayroll * 0;
-    const rentSpike     = (dayInMonth >= 1 && dayInMonth <= 7) ? 19194 : 0;
-    const superSpike    = (dayInMonth >= 26 && dayInMonth <= 31 && weekStart.getMonth() % 3 === 2) ? 38000 : 0;
-
     const payments = {
-      payroll:     Math.round(cashOverrides[`${wKey}_payroll`]  ?? payrollSpike),
-      rent:        Math.round(cashOverrides[`${wKey}_rent`]     ?? rentSpike),
-      super:       Math.round(cashOverrides[`${wKey}_super`]    ?? superSpike),
-      overheads:   Math.round(cashOverrides[`${wKey}_overhead`] ?? weeklyOverheads),
+      payroll:   Math.round(cashOverrides[`${wKey}_payroll`]  ?? pay.payroll),
+      rent:      Math.round(cashOverrides[`${wKey}_rent`]     ?? pay.rent),
+      super:     Math.round(cashOverrides[`${wKey}_super`]    ?? pay.super),
+      overheads: Math.round(cashOverrides[`${wKey}_overhead`] ?? pay.overheads),
     };
     const totalPayments = Object.values(payments).reduce((s,v) => s+v, 0);
 
-    // One-off items
     const oneOff = cashOverrides[`${wKey}_oneoff`] || 0;
-
     const opening = balance;
     const net     = totalReceipts - totalPayments + oneOff;
     balance       = opening + net;
 
-    weeks.push({
-      wKey, label: wLabel, weekStart: weekStart.toISOString().slice(0,10),
+    return {
+      wKey, label: wLabel, weekStart: ws.toISOString().slice(0,10),
       mLabel, w,
       opening: Math.round(opening),
       receipts, totalReceipts,
@@ -5513,9 +5603,8 @@ function build13WeekForecast(operationalFinancials, startingBalance, cashOverrid
       oneOff,
       net: Math.round(net),
       closing: Math.round(balance),
-    });
-  }
-  return weeks;
+    };
+  });
 }
 
 
@@ -5851,20 +5940,32 @@ function CashFlowForecastView({ data }) {
   const [oneOffLabel, setOneOffLabel] = useState("");
   const inputRef = useCallback(n => { if(n) { n.focus(); n.select(); } }, []);
 
-  // Derive starting balance from last actual (Feb-26)
+  // Anchor the rolling forecast at next Monday from today.
+  const today = useMemo(() => new Date(), []);
+  const startDate = useMemo(() => _next13WeekStart(today), [today]);
+
+  // Starting balance: closing balance of the most recent operationalFinancials
+  // month that ends strictly before the forecast start date.
   const startingBalance = useMemo(() => {
-    const febOp = data.operationalFinancials.find(op => op.month === "Feb-26");
-    return febOp ? Math.round(febOp.closingBalance) : 850000;
-  }, [data]);
+    const ops = data.operationalFinancials.filter(op => op.dateObj < startDate);
+    const last = ops[ops.length - 1];
+    return last ? Math.round(last.closingBalance) : 850000;
+  }, [data, startDate]);
+  const startingBalanceLabel = useMemo(() => {
+    const ops = data.operationalFinancials.filter(op => op.dateObj < startDate);
+    return ops[ops.length - 1]?.month || "prior month";
+  }, [data, startDate]);
 
   const weeks = useMemo(() =>
-    build13WeekForecast(data.operationalFinancials, startingBalance, cashOverrides),
-  [data, startingBalance, cashOverrides]);
+    build13WeekForecast(data.operationalFinancials, startingBalance, cashOverrides, today),
+  [data, startingBalance, cashOverrides, today]);
 
   const minBalance = Math.min(...weeks.map(w => w.closing));
-  const maxBalance = Math.max(...weeks.map(w => w.closing));
   const totalIn    = weeks.reduce((s, w) => s + w.totalReceipts, 0);
   const totalOut   = weeks.reduce((s, w) => s + w.totalPayments, 0);
+
+  const fmtRange = d => d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
+  const endDate = new Date(startDate); endDate.setDate(startDate.getDate() + 12 * 7 + 6);
 
   // Chart data
   const chartData = weeks.map(w => ({
@@ -5879,6 +5980,7 @@ function CashFlowForecastView({ data }) {
     nsw: w.receipts.nsw_skills,
     nt:  w.receipts.nt_training,
     tas: w.receipts.tas_sgs,
+    sa:  w.receipts.sa_skills,
     ep:  w.receipts.ep_pathways,
     ffs: w.receipts.fee_for_svc,
   }));
@@ -5923,7 +6025,7 @@ function CashFlowForecastView({ data }) {
             13-Week Cash Flow Forecast
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Rolling from 2 Mar 2026 · Starting balance {fmtK(startingBalance)} (Feb-26 close) · Click any cell to override
+            Rolling {fmtRange(startDate)} – {fmtRange(endDate)} · Starting balance {fmtK(startingBalance)} ({startingBalanceLabel} close) · Click any cell to override
           </p>
         </div>
         <div className="flex gap-2">
@@ -5939,7 +6041,7 @@ function CashFlowForecastView({ data }) {
       {/* ── KPI Strip ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
-          { label: "Opening Balance", val: fmtK(startingBalance), sub: "Feb-26 actual close",    color: "bg-indigo-500",  icon: Landmark },
+          { label: "Opening Balance", val: fmtK(startingBalance), sub: `${startingBalanceLabel} close`, color: "bg-indigo-500",  icon: Landmark },
           { label: "Total Receipts",  val: fmtK(totalIn),         sub: "13-week gross inflows",  color: "bg-emerald-500", icon: TrendingUp },
           { label: "Total Payments",  val: fmtK(totalOut),        sub: "13-week gross outflows",  color: "bg-rose-500",    icon: TrendingDown },
           { label: "Closing (Wk 13)", val: fmtK(weeks[12]?.closing || 0), sub: minBalance < 200000 ? "⚠ Balance dips low" : "Healthy trajectory", color: minBalance < 0 ? "bg-rose-600" : minBalance < 200000 ? "bg-amber-500" : "bg-teal-500", icon: Wallet },
@@ -5977,7 +6079,8 @@ function CashFlowForecastView({ data }) {
         <p className="text-[9px] text-amber-600 mt-1">— Dashed line = $200k minimum recommended balance</p>
       </div>
 
-      {/* ── Government Receipts Chart ── */}
+      {/* ── Government Receipts Chart (detail only) ── */}
+      {viewMode === "detail" && (
       <div className="bg-white rounded-xl border border-slate-100 p-5">
         <h3 className="text-sm font-bold text-slate-700 mb-1">Government Claim Receipts by Source</h3>
         <p className="text-[10px] text-slate-400 mb-4">Weekly inflows by funding stream — spikes reflect claim payment cycles</p>
@@ -5993,14 +6096,17 @@ function CashFlowForecastView({ data }) {
               <Bar dataKey="nsw" name="NSW Smart & Skilled"   stackId="a" fill="#3b82f6"/>
               <Bar dataKey="nt"  name="NT Training"           stackId="a" fill="#ef4444"/>
               <Bar dataKey="tas" name="TAS SGS"               stackId="a" fill="#10b981"/>
+              <Bar dataKey="sa"  name="SA Skilling SA"        stackId="a" fill="#84cc16"/>
               <Bar dataKey="ep"  name="Education Pathways"    stackId="a" fill="#0d9488"/>
               <Bar dataKey="ffs" name="Fee-for-Service"       stackId="a" fill="#8b5cf6" radius={[3,3,0,0]}/>
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
+      )}
 
-      {/* ── Weekly Table ── */}
+      {/* ── Weekly Table (detail only) ── */}
+      {viewMode === "detail" && (
       <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
         <div className="px-5 py-3 bg-slate-800 text-white flex items-center justify-between">
           <h3 className="text-sm font-bold">Week-by-Week Cash Flow Detail</h3>
@@ -6059,7 +6165,7 @@ function CashFlowForecastView({ data }) {
                     })}
 
                     <td className="px-3 py-2 text-right font-mono text-emerald-500">
-                      {fmtK(w.receipts.nt_training + w.receipts.tas_sgs + w.receipts.fee_for_svc)}
+                      {fmtK(w.receipts.nt_training + w.receipts.tas_sgs + w.receipts.sa_skills + w.receipts.fee_for_svc)}
                     </td>
                     <td className="px-3 py-2 text-right font-bold font-mono text-emerald-700 bg-emerald-50/60">{fmtK(w.totalReceipts)}</td>
 
@@ -6144,6 +6250,13 @@ function CashFlowForecastView({ data }) {
           <span className="text-amber-600">Amber = below $200k minimum · Red = cash deficit</span>
         </div>
       </div>
+      )}
+
+      {viewMode === "summary" && (
+        <div className="bg-white rounded-xl border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
+          Switch to <strong className="text-indigo-600">Detail</strong> for the per-stream chart and editable week-by-week table.
+        </div>
+      )}
     </div>
   );
 }
