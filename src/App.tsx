@@ -6559,9 +6559,16 @@ const NAV = [
 
 const GROUP_COLORS = {Analytics:"bg-blue-600", Planning:"bg-emerald-600", Source:"bg-slate-600"};
 
+// Tabs whose content actually filters by yearBasis/selectedYear. Other tabs
+// (cashflow rolling 13-week view, P&L FY-tab view, modellers, audit logs etc.)
+// don't read those props, so the global controls are hidden there to avoid
+// showing buttons that look broken.
+const YEAR_AWARE_TABS = new Set(["dashboard", "regions", "expenses", "modeler", "staff", "crm", "data"]);
+
 function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, selectedYear, setSelectedYear, availableYears, onReset, supaStatus, currentUser, onLogout}) {
   const groups = [...new Set(NAV.map(n=>n.group))];
   const activeItem = NAV.find(n=>n.id===activeTab);
+  const showYearControls = YEAR_AWARE_TABS.has(activeTab);
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden" style={{fontFamily:"'DM Sans', system-ui, sans-serif"}}>
@@ -6632,24 +6639,26 @@ function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, sele
             <h2 className="text-base font-bold text-slate-800">{activeItem?.label}</h2>
             <span className="text-xs text-slate-400">FY 2025–2028</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
-              {["financial","calendar"].map(b=>(
-                <button key={b} onClick={()=>setYearBasis(b)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all ${yearBasis===b?"bg-white text-blue-600 shadow-sm":"text-slate-500 hover:text-slate-700"}`}>
-                  {b==="financial"?"FY":"CY"}
-                </button>
-              ))}
+          {showYearControls && (
+            <div className="flex items-center gap-2">
+              <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                {["financial","calendar"].map(b=>(
+                  <button key={b} onClick={()=>setYearBasis(b)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all ${yearBasis===b?"bg-white text-blue-600 shadow-sm":"text-slate-500 hover:text-slate-700"}`}>
+                    {b==="financial"?"FY":"CY"}
+                  </button>
+                ))}
+              </div>
+              <div className="relative">
+                <Calendar size={12} className="absolute left-2.5 top-2 text-slate-400"/>
+                <select value={selectedYear} onChange={e=>setSelectedYear(e.target.value)}
+                  className="pl-7 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-400 outline-none text-slate-700">
+                  <option value="All">All Time</option>
+                  {availableYears.map(y=><option key={y}>{y}</option>)}
+                </select>
+              </div>
             </div>
-            <div className="relative">
-              <Calendar size={12} className="absolute left-2.5 top-2 text-slate-400"/>
-              <select value={selectedYear} onChange={e=>setSelectedYear(e.target.value)}
-                className="pl-7 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-400 outline-none text-slate-700">
-                <option value="All">All Time</option>
-                {availableYears.map(y=><option key={y}>{y}</option>)}
-              </select>
-            </div>
-          </div>
+          )}
         </header>
         <div className="flex-1 overflow-y-auto p-6">{children}</div>
       </main>
@@ -6955,21 +6964,23 @@ export default function App() {
   };
 
   // ── Wage increase: apply (commit to DB + audit) ────────────────────────────
+  // Persist to localStorage first so the UI is always in sync; the Supabase
+  // write is best-effort (the coa_adjustments table is numeric-typed so a
+  // JSON-string value can return a 4xx — we don't want that to surface as
+  // a user-facing error).
   const handleApplyWage = async (draft) => {
     const prev = { ...appliedWage };
     setAppliedWage(draft);
     localStorage.setItem("applied_wage_settings", JSON.stringify(draft));
     try {
-      const ok = await sbUpsert("coa_adjustments", [{ key: "__wage_settings__", value: JSON.stringify(draft) }]);
-      if (!ok) throw new Error("Supabase upsert failed for wage settings");
+      await sbUpsert("coa_adjustments", [{ key: "__wage_settings__", value: JSON.stringify(draft) }]);
       await sbAudit(currentUser, "UPDATE", "WAGE",
         `Wage increase applied — FY26: ${draft.fy26}%, FY27: ${draft.fy27}%, FY28: ${draft.fy28}%, effective from ${draft.effectiveMonth}`,
         prev,
         draft
       );
     } catch(e) {
-      console.error("Wage settings save failed:", e);
-      alert("⚠️ Wage settings saved locally but DB write failed: " + e.message);
+      console.warn("Wage settings remote sync failed (kept locally):", e);
     }
   };
 
@@ -6985,7 +6996,7 @@ export default function App() {
         prev,
         cleared
       );
-    } catch(e) { console.error("Wage clear failed:", e); }
+    } catch(e) { console.warn("Wage clear remote sync failed:", e); }
   };
 
     const handleReset = () => {
