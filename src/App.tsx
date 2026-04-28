@@ -169,12 +169,12 @@ function fmtAUD(v, compact=true) {
 
 // ─── STATIC DATA FROM JSONs ────────────────────────────────────────────────────
 const UNIT_RATES = {
-  MSL20122:{QLD:338.75,NSW:null,NT:null,TAS:null,ACT:null,VIC:300,WA:977.4,SA:null,EP:338.75},
-  MSL30122:{QLD:391.69,NSW:594.62,NT:358.4,TAS:384.69,ACT:319.23,VIC:581.54,WA:601.48,SA:321.23,EP:391.69},
-  MSL40122:{QLD:775,NSW:782.67,NT:481.6,TAS:616.07,ACT:657.33,VIC:931,WA:1051.59,SA:396.27,EP:775},
-  MSL50122:{QLD:265.56,NSW:815.56,NT:733.6,TAS:450,ACT:492.78,VIC:556.11,WA:654.66,SA:324.88,EP:265.56},
-  HLT37215:{QLD:450.71,NSW:552.14,NT:432.14,TAS:322.64,ACT:350.71,VIC:417.86,WA:558.51,SA:278.64,EP:450.71},
-  FFS:{QLD:350,NSW:350,NT:350,TAS:350,ACT:350,VIC:350,WA:350,SA:350,EP:350}
+  MSL20122:{QLD:338.75,NSW:null,NT:null,TAS:null,ACT:null,VIC:300,SA:null,EP:338.75},
+  MSL30122:{QLD:391.69,NSW:594.62,NT:358.4,TAS:384.69,ACT:319.23,VIC:581.54,SA:321.23,EP:391.69},
+  MSL40122:{QLD:775,NSW:782.67,NT:481.6,TAS:616.07,ACT:657.33,VIC:931,SA:396.27,EP:775},
+  MSL50122:{QLD:265.56,NSW:815.56,NT:733.6,TAS:450,ACT:492.78,VIC:556.11,SA:324.88,EP:265.56},
+  HLT37215:{QLD:450.71,NSW:552.14,NT:432.14,TAS:322.64,ACT:350.71,VIC:417.86,SA:278.64,EP:450.71},
+  FFS:{QLD:350,NSW:350,NT:350,TAS:350,ACT:350,VIC:350,SA:350,EP:350}
 };
 
 const BUDGET_INPUTS = [
@@ -359,14 +359,6 @@ const UNIT_ASSUMPTIONS_FY26 = {
     HLT37215: {price: UNIT_RATES.HLT37215.VIC, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:30,Apr:60,May:90,Jun:120}},
     FFS:      {price: UNIT_RATES.FFS.VIC,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
-  WA: {
-    MSL20122: {price: UNIT_RATES.MSL20122.WA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:10,Dec:10,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    MSL30122: {price: UNIT_RATES.MSL30122.WA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:3,Mar:4,Apr:4,May:8,Jun:10}},
-    MSL40122: {price: UNIT_RATES.MSL40122.WA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:10,Dec:10,Jan:0,Feb:10,Mar:25,Apr:40,May:46,Jun:53}},
-    MSL50122: {price: UNIT_RATES.MSL50122.WA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:2,Mar:2,Apr:2,May:2,Jun:2}},
-    HLT37215: {price: UNIT_RATES.HLT37215.WA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:5,Dec:5,Jan:0,Feb:5,Mar:20,Apr:40,May:60,Jun:80}},
-    FFS:      {price: UNIT_RATES.FFS.WA,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-  },
   SA: {
     MSL30122: {price: UNIT_RATES.MSL30122.SA, monthly: {Jul:2,Aug:4,Sep:6,Oct:6,Nov:8,Dec:4,Jan:5,Feb:12,Mar:12,Apr:12,May:14,Jun:12}},
     MSL40122: {price: UNIT_RATES.MSL40122.SA, monthly: {Jul:6,Aug:6,Sep:6,Oct:7,Nov:7,Dec:4,Jan:7,Feb:18,Mar:22,Apr:22,May:24,Jun:22}},
@@ -548,7 +540,7 @@ function getMonthlyCost(roleId) {
 
 // ─── COLORS ──────────────────────────────────────────────────────────────────
 const COLORS = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16"];
-const REGION_COLORS = {QLD:"#f59e0b",NSW:"#3b82f6",NT:"#ef4444",TAS:"#10b981",ACT:"#8b5cf6",VIC:"#06b6d4",WA:"#ec4899",SA:"#84cc16",EP:"#0d9488"};
+const REGION_COLORS = {QLD:"#f59e0b",NSW:"#3b82f6",NT:"#ef4444",TAS:"#10b981",ACT:"#8b5cf6",VIC:"#06b6d4",SA:"#84cc16",EP:"#0d9488"};
 
 // ─── STATS CARD ───────────────────────────────────────────────────────────────
 function StatsCard({title, value, trend, icon: Icon, color}) {
@@ -4591,7 +4583,7 @@ ${topExpenses.map((e, i) => `${i+1}. ${e.account} (${e.section}): ${fmtAUD(e.tot
 - Key roles include: Sales Consultants, Training Coordinators, Operations, Management
 
 ## REVENUE MODEL
-- Revenue driven by course unit enrolments across 8 regions (QLD, NSW, VIC, SA, WA, TAS, NT/ACT) plus EP (Education Pathways — national delivery stream)
+- Revenue driven by course unit enrolments across 7 regions (QLD, NSW, VIC, SA, TAS, NT/ACT) plus EP (Education Pathways — national delivery stream)
 - Key qualifications: MSL20122, MSL30122, MSL40122, MSL50122, HLT37215
 - Sales model: linear ramp — 21 units/month from month 4, targeting $100k/month per salesperson by month 13
 - Average unit value varies by region (~$471/unit in QLD)
