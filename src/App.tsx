@@ -380,6 +380,34 @@ const UNIT_ASSUMPTIONS_FY26 = {
 
 // ─── Ramp helpers (used by both buildBaselineData and StaffPlanner) ──────────
 function _getTrainerUnits(mo) { if(mo<3)return 0; if(mo===3)return 10; if(mo===4)return 25; return 42; }
+
+// Departure replacement opportunity-cost defaults.
+//   - DEFAULT_RECRUITMENT_COST: one-off hit in the departure month when the
+//     event is flagged with replacement.
+//   - Full-capacity baselines used to compute the ramp gap of the incoming
+//     replacement: trainer → 42 units/mo (sustained), sales → 210 units/mo
+//     (≈ $100k target at QLD avg unit value).
+const DEFAULT_RECRUITMENT_COST = 2000;
+const FULL_CAPACITY_UNITS = { trainer: 42, sales: 210 };
+
+// Per-month financial impact of a departure event for month-since-departure
+// `ma`. Returns { costDelta, revDelta, oneOff }. costDelta is +ve for cost
+// going up (so adds to payments), revDelta is +ve for revenue going up.
+function _departureImpact(ev, ma, mCost, uv) {
+  if (ev.withReplacement) {
+    // Replacement backfills the wage cost; recruitment is the only direct cost
+    // in the start month; revenue loss equals the replacement's ramp gap.
+    const recruit = ma === 0 ? (Number(ev.recruitmentCost) || DEFAULT_RECRUITMENT_COST) * ev.count : 0;
+    const full = FULL_CAPACITY_UNITS[ev.roleId] || 0;
+    const ramp = ev.roleId === "trainer" ? _getTrainerUnits(ma) : ev.roleId === "sales" ? _getSalesUnits(ma) : 0;
+    const gap = Math.max(0, full - ramp);
+    return { costDelta: recruit, revDelta: -gap * ev.count * uv, oneOff: recruit };
+  }
+  // Legacy "no replacement" model: full wage saving, lost units track the
+  // ramp curve.
+  const ramp = ev.roleId === "trainer" ? _getTrainerUnits(ma) : ev.roleId === "sales" ? _getSalesUnits(ma) : 0;
+  return { costDelta: -mCost, revDelta: -ramp * ev.count * uv, oneOff: 0 };
+}
 // Sales ramp: 3-month cliff, then 21 units × (month - 3) linear ramp
 // Target: $100,000/mo revenue ≈ 212 units/mo at QLD avg $471/unit (reached ~month 13)
 // Formula derived from Sales_Unit_Distribution formula sheet.
@@ -504,14 +532,14 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
       if (i >= ev.si) {
         const mCost = getMonthlyCost(ev.roleId) * ev.count;
         const ma = i - ev.si;
-        const uPP = ev.roleId === "trainer" ? _getTrainerUnits(ma) : ev.roleId === "sales" ? _getSalesUnits(ma) : 0;
-        const mRev = uPP * ev.count * ev.uv;
         if (ev.eventType === "departure") {
-          filledStaffCostDelta -= mCost;  // wage saving
-          filledRevDelta       -= mRev;   // lost revenue
+          const { costDelta, revDelta } = _departureImpact(ev, ma, mCost, ev.uv);
+          filledStaffCostDelta += costDelta;
+          filledRevDelta       += revDelta;
         } else {
+          const uPP = ev.roleId === "trainer" ? _getTrainerUnits(ma) : ev.roleId === "sales" ? _getSalesUnits(ma) : 0;
           filledStaffCostDelta += mCost;
-          filledRevDelta       += mRev;
+          filledRevDelta       += uPP * ev.count * ev.uv;
         }
       }
     });
@@ -1217,6 +1245,8 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   const [startMonth, setStartMonth] = useState(months[0]||"");
   const [region, setRegion] = useState(regions[0]||"");
   const [trainerType, setTrainerType] = useState("MSL"); // only meaningful when role==="trainer"
+  const [withReplacement, setWithReplacement] = useState(true); // only meaningful when eventType==="departure"
+  const [recruitmentCost, setRecruitmentCost] = useState(DEFAULT_RECRUITMENT_COST);
   const [aStart, setAStart] = useState(months[0]||"");
   const [aEnd, setAEnd] = useState(months[months.length-1]||"");
 
@@ -1303,23 +1333,20 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
         if (i >= ev.si) {
           const mCost = getMonthlyCost(ev.roleId) * ev.count;
           const ma = i - ev.si;
-          let uPP = 0;
-          if (ev.roleId === "trainer") uPP = getTrainerUnits(ma);
-          else if (ev.roleId === "sales") uPP = getSalesUnits(ma);
           const uv = ev.roleId === "trainer" && ev.trainerType
             ? _regionAvgUnitValue(ev.region, ev.trainerType)
             : (regionUnitValues.get(ev.region) || 0);
-          const mRev = uPP * ev.count * uv;
 
           if (ev.isDeparture) {
-            // Departure: save the wage cost but LOSE the revenue contribution
-            staffCostDelta -= mCost;   // negative = savings on payments
-            revDelta       -= mRev;    // negative = lost revenue
+            const { costDelta, revDelta: dRev } = _departureImpact(ev, ma, mCost, uv);
+            staffCostDelta += costDelta;
+            revDelta       += dRev;
             headcount      -= ev.count;
           } else {
             // Hire: add wage cost, gain revenue
+            const uPP = ev.roleId === "trainer" ? getTrainerUnits(ma) : ev.roleId === "sales" ? getSalesUnits(ma) : 0;
             staffCostDelta += mCost;
-            revDelta       += mRev;
+            revDelta       += uPP * ev.count * uv;
             genUnits       += uPP * ev.count;
             headcount      += ev.count;
           }
@@ -1423,6 +1450,10 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
       region,
       eventType,
       ...(role === "trainer" ? { trainerType } : {}),
+      ...(eventType === "departure" ? {
+        withReplacement,
+        recruitmentCost: withReplacement ? Math.max(0, Number(recruitmentCost) || 0) : 0,
+      } : {}),
     };
     setHiringEvents(prev => [...prev, newEvent]);
 
@@ -1516,8 +1547,31 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
             </div>
 
             {eventType === "departure" && (
-              <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700">
-                <strong>Departure</strong> — removes staff cost saving <em>and</em> loses their unit/revenue contribution from that month forward.
+              <div className="mb-3 p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 space-y-2">
+                <div>
+                  <strong>Departure</strong> — removes staff cost saving <em>and</em> loses their unit/revenue contribution from that month forward.
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer pt-1 border-t border-rose-200">
+                  <input type="checkbox" checked={withReplacement}
+                    onChange={e => setWithReplacement(e.target.checked)}
+                    className="accent-rose-600 cursor-pointer"/>
+                  <span className="font-semibold text-rose-700">Plan replacement (recruitment + ramp gap)</span>
+                </label>
+                {withReplacement && (
+                  <>
+                    <p className="text-[10px] text-rose-600 leading-relaxed pl-5">
+                      Replacement covers the wage; you incur a one-off recruitment cost and lose units while the replacement ramps up
+                      ({(role === "trainer" || role === "sales") ? "matches the standard ramp schedule" : "no productivity gap modelled for this role"}).
+                    </p>
+                    <div className="flex items-center gap-2 pl-5">
+                      <label className="text-[10px] text-rose-700 font-semibold">Recruitment cost ($)</label>
+                      <input type="number" min="0" step="100" value={recruitmentCost}
+                        onChange={e => setRecruitmentCost(Math.max(0, parseFloat(e.target.value) || 0))}
+                        className="w-24 px-2 py-1 text-xs border border-rose-300 rounded bg-white focus:ring-1 focus:ring-rose-400 outline-none"/>
+                      <span className="text-[10px] text-rose-500">per departing person</span>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -1788,6 +1842,11 @@ Be direct, specific with dollar amounts, and use plain English. No bullet points
                               <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-semibold">{ev.trainerType}</span>
                             )}
                             <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded text-slate-600">{ev.region}</span>
+                            {isDep && ev.withReplacement && (
+                              <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold" title={`Replacement opportunity cost: $${(Number(ev.recruitmentCost)||DEFAULT_RECRUITMENT_COST).toLocaleString()} recruitment + ramp gap`}>
+                                + replacement
+                              </span>
+                            )}
                             {isFilled
                               ? <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${isDep?"bg-red-100 text-red-700":"bg-emerald-100 text-emerald-700"}`}>
                                   {isDep ? "✓ Confirmed — actuals updated" : "✓ Confirmed — in budget"}
@@ -7248,16 +7307,26 @@ export default function App() {
 
         const hireData = await sbGet("hiring_plan");
         if (hireData && Array.isArray(hireData) && hireData.length > 0) {
-          // Merge in trainerType from localStorage — the Supabase schema
-          // doesn't carry it, but the full event JSON in localStorage does.
+          // Merge extras from localStorage — the Supabase schema doesn't
+          // carry trainerType / replacement-cost fields, but the full event
+          // JSON in localStorage does.
           let lsExtras = {};
           try {
             const ls = JSON.parse(localStorage.getItem("staff_hiring_plan") || "[]");
-            lsExtras = Object.fromEntries(ls.filter(e => e.id && e.trainerType).map(e => [e.id, e.trainerType]));
+            lsExtras = Object.fromEntries(ls.filter(e => e.id).map(e => [e.id, {
+              trainerType: e.trainerType,
+              withReplacement: e.withReplacement,
+              recruitmentCost: e.recruitmentCost,
+            }]));
           } catch {}
           setHiringEvents(hireData.map(r => {
             const ev = {id:r.id||Math.random().toString(36).slice(2), roleId:r.role_id, count:r.count, startMonth:r.start_month, region:r.region, filled:!!r.filled, eventType:r.event_type||"hire"};
-            if (ev.roleId === "trainer" && lsExtras[ev.id]) ev.trainerType = lsExtras[ev.id];
+            const extras = lsExtras[ev.id] || {};
+            if (ev.roleId === "trainer" && extras.trainerType) ev.trainerType = extras.trainerType;
+            if (ev.eventType === "departure") {
+              if (extras.withReplacement !== undefined) ev.withReplacement = extras.withReplacement;
+              if (extras.recruitmentCost !== undefined) ev.recruitmentCost = extras.recruitmentCost;
+            }
             return ev;
           }));
         } else {
