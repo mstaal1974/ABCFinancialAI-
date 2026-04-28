@@ -3330,12 +3330,96 @@ function PasswordChangeScreen({ user, onComplete }) {
 
 // ─── CALCULATION AUDIT PANEL ──────────────────────────────────────────────────
 // READ-ONLY: flags discrepancies only. No data changes made here.
-function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments }) {
+function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments, currentUser }) {
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [flags, setFlags] = useState([]);
   const [aiNarrative, setAiNarrative] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [expandedFlag, setExpandedFlag] = useState(null);
+
+  // ── Per-flag review/rectification state ────────────────────────────────────
+  // Shape: { [flagId]: { assignedTo, assignedAt, rectified, rectifiedAt, rectifiedBy } }
+  // Persisted to localStorage so review status survives audit re-runs and reloads.
+  const [flagStates, setFlagStates] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("calc_audit_state") || "{}"); }
+    catch { return {}; }
+  });
+  const [reviewOpenFor, setReviewOpenFor] = useState(null); // flag.id whose Review picker is open
+  const [reviewEmailInput, setReviewEmailInput] = useState("");
+  const [showRectified, setShowRectified] = useState(false);
+
+  const persistFlagStates = (next) => {
+    setFlagStates(next);
+    localStorage.setItem("calc_audit_state", JSON.stringify(next));
+  };
+
+  const userLabel = (email) => {
+    if (!email) return "";
+    return email.split("@")[0].replace(/[._]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  };
+
+  const handleAssign = async (flag, assignee) => {
+    if (!assignee) return;
+    const prev = flagStates[flag.id] || {};
+    const next = {
+      ...flagStates,
+      [flag.id]: { ...prev, assignedTo: assignee, assignedAt: new Date().toISOString() },
+    };
+    persistFlagStates(next);
+    setReviewOpenFor(null);
+    setReviewEmailInput("");
+    try {
+      await sbAudit(currentUser, "REVIEW", "CALC_AUDIT",
+        `Assigned for review to ${assignee}: ${flag.title}`,
+        prev.assignedTo || null,
+        assignee
+      );
+    } catch(e) { console.warn("Audit log for review-assign failed:", e); }
+  };
+
+  const handleClearAssignment = async (flag) => {
+    const prev = flagStates[flag.id] || {};
+    if (!prev.assignedTo) return;
+    const next = { ...flagStates, [flag.id]: { ...prev, assignedTo: null, assignedAt: null } };
+    persistFlagStates(next);
+    try {
+      await sbAudit(currentUser, "REVIEW", "CALC_AUDIT",
+        `Cleared review assignment: ${flag.title}`,
+        prev.assignedTo,
+        null
+      );
+    } catch(e) { console.warn("Audit log for review-clear failed:", e); }
+  };
+
+  const handleRectify = async (flag) => {
+    const prev = flagStates[flag.id] || {};
+    const rectifiedBy = currentUser?.email || "unknown";
+    const next = {
+      ...flagStates,
+      [flag.id]: { ...prev, rectified: true, rectifiedAt: new Date().toISOString(), rectifiedBy },
+    };
+    persistFlagStates(next);
+    try {
+      await sbAudit(currentUser, "RECTIFY", "CALC_AUDIT",
+        `Marked rectified: ${flag.title}`,
+        { severity: flag.severity, category: flag.category, assignedTo: prev.assignedTo || null },
+        { rectifiedBy, rectifiedAt: next[flag.id].rectifiedAt }
+      );
+    } catch(e) { console.warn("Audit log for rectify failed:", e); }
+  };
+
+  const handleReopen = async (flag) => {
+    const prev = flagStates[flag.id] || {};
+    const next = { ...flagStates, [flag.id]: { ...prev, rectified: false, rectifiedAt: null, rectifiedBy: null } };
+    persistFlagStates(next);
+    try {
+      await sbAudit(currentUser, "UPDATE", "CALC_AUDIT",
+        `Reopened (un-rectified): ${flag.title}`,
+        { rectifiedBy: prev.rectifiedBy, rectifiedAt: prev.rectifiedAt },
+        null
+      );
+    } catch(e) { console.warn("Audit log for reopen failed:", e); }
+  };
 
   // ── Run deterministic checks ───────────────────────────────────────────────
   const runChecks = () => {
@@ -3529,10 +3613,11 @@ function CalcAuditPanel({ data, peopleOverrides, hiringEvents, coaAdjustments })
 
   // ── AI narrative via Anthropic API ────────────────────────────────────────
   const runAiReview = async () => {
-    if (flags.length === 0) return;
+    const reviewable = flags.filter(f => !flagStates[f.id]?.rectified);
+    if (reviewable.length === 0) return;
     setAiLoading(true);
     try {
-      const summary = flags.map(f =>
+      const summary = reviewable.map(f =>
         `[${f.severity.toUpperCase()}] ${f.category} — ${f.title}\nExpected: ${f.expected}\nActual: ${f.actual}\nImpact: ${f.impact}`
       ).join("\n\n");
 
@@ -3558,7 +3643,7 @@ FY26 Financial Summary:
 - Total Payments: $${Math.round(totalPmt).toLocaleString()}
 - FY26 Closing Balance: $${Math.round(closingBal).toLocaleString()}
 
-Flags Found (${flags.length} total):
+Flags Found (${reviewable.length} open):
 ${summary}
 
 Please assess: (1) which flags most materially affect financial accuracy, (2) whether the cashflow figures are reliable given these flags, (3) any reconciliation steps recommended before presenting to management.`
@@ -3580,9 +3665,11 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
     low:    { bg: "bg-blue-50",   border: "border-blue-200",  badge: "bg-blue-100 text-blue-700",   icon: "🔵", label: "Low" },
   };
 
-  const highCount   = flags.filter(f => f.severity === "high").length;
-  const medCount    = flags.filter(f => f.severity === "medium").length;
-  const lowCount    = flags.filter(f => f.severity === "low").length;
+  const openFlags      = flags.filter(f => !flagStates[f.id]?.rectified);
+  const rectifiedFlags = flags.filter(f =>  flagStates[f.id]?.rectified);
+  const highCount   = openFlags.filter(f => f.severity === "high").length;
+  const medCount    = openFlags.filter(f => f.severity === "medium").length;
+  const lowCount    = openFlags.filter(f => f.severity === "low").length;
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -3637,7 +3724,9 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
                 medCount > 0  ? "bg-amber-100 text-amber-700" :
                 "bg-emerald-100 text-emerald-700"
               }`}>
-                {flags.length === 0 ? "✓ No issues found" : `${flags.length} flag${flags.length>1?"s":""} found`}
+                {openFlags.length === 0
+                  ? (rectifiedFlags.length > 0 ? `✓ All ${rectifiedFlags.length} flag(s) rectified` : "✓ No issues found")
+                  : `${openFlags.length} open flag${openFlags.length>1?"s":""}${rectifiedFlags.length > 0 ? ` · ${rectifiedFlags.length} rectified` : ""}`}
               </span>
             </div>
             <div className="flex gap-4 text-sm">
@@ -3647,17 +3736,19 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
             </div>
           </div>
 
-          {/* Flag list */}
-          {flags.length > 0 && (
+          {/* Open flag list */}
+          {openFlags.length > 0 && (
             <div className="space-y-3">
-              {flags.map((f, i) => {
+              {openFlags.map((f) => {
                 const s = severityConfig[f.severity] || severityConfig.low;
                 const isOpen = expandedFlag === f.id;
+                const fs = flagStates[f.id] || {};
+                const isReviewing = reviewOpenFor === f.id;
                 return (
                   <div key={f.id} className={`rounded-xl border-2 ${s.border} ${s.bg} overflow-hidden`}>
-                    <button
+                    <div
                       onClick={() => setExpandedFlag(isOpen ? null : f.id)}
-                      className="w-full flex items-start gap-3 p-4 text-left"
+                      className="w-full flex items-start gap-3 p-4 text-left cursor-pointer"
                     >
                       <span className="text-base mt-0.5">{s.icon}</span>
                       <div className="flex-1 min-w-0">
@@ -3665,6 +3756,12 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${s.badge}`}>{s.label}</span>
                           <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">{f.category}</span>
                           <span className="text-xs font-bold text-slate-800">{f.title}</span>
+                          {fs.assignedTo && (
+                            <span className="text-[10px] bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full font-semibold flex items-center gap-1"
+                              title={`Assigned ${new Date(fs.assignedAt).toLocaleString()}`}>
+                              <Users size={10}/>{userLabel(fs.assignedTo)}
+                            </span>
+                          )}
                         </div>
                         {isOpen && (
                           <div className="mt-3 space-y-2 text-xs">
@@ -3687,18 +3784,110 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
                         )}
                       </div>
                       <ChevronRight size={14} className={`text-slate-400 shrink-0 mt-1 transition-transform ${isOpen ? "rotate-90" : ""}`}/>
-                    </button>
+                    </div>
+
+                    {/* Action row — Review / Rectify */}
+                    <div className="px-4 pb-3 pt-2 border-t border-slate-200/60 flex flex-wrap items-center gap-2 bg-white/40">
+                      {!fs.assignedTo && !isReviewing && (
+                        <button onClick={(e) => { e.stopPropagation(); setReviewOpenFor(f.id); setReviewEmailInput(""); }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-violet-600 hover:bg-violet-700 text-white transition-colors">
+                          <Users size={11}/>Review
+                        </button>
+                      )}
+                      {fs.assignedTo && !isReviewing && (
+                        <>
+                          <span className="text-[11px] text-violet-700 bg-violet-50 border border-violet-200 px-2.5 py-1 rounded-lg font-medium">
+                            Assigned to <strong>{userLabel(fs.assignedTo)}</strong>
+                          </span>
+                          <button onClick={(e) => { e.stopPropagation(); setReviewOpenFor(f.id); setReviewEmailInput(fs.assignedTo); }}
+                            className="text-[11px] text-violet-600 hover:text-violet-800 underline">Reassign</button>
+                          <button onClick={(e) => { e.stopPropagation(); handleClearAssignment(f); }}
+                            className="text-[11px] text-slate-500 hover:text-slate-700 underline">Clear</button>
+                        </>
+                      )}
+                      {isReviewing && (
+                        <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-2 flex-wrap bg-white border border-violet-200 rounded-lg px-2 py-1.5">
+                          <span className="text-[11px] font-semibold text-violet-700">Assign to:</span>
+                          {currentUser?.email && (
+                            <button onClick={() => handleAssign(f, currentUser.email)}
+                              className="text-[11px] bg-violet-600 hover:bg-violet-700 text-white px-2 py-1 rounded font-semibold transition-colors">
+                              Me ({userLabel(currentUser.email)})
+                            </button>
+                          )}
+                          <input type="email" placeholder="email@..."
+                            value={reviewEmailInput}
+                            onChange={e => setReviewEmailInput(e.target.value)}
+                            onKeyDown={e => { if (e.key === "Enter" && reviewEmailInput.includes("@")) handleAssign(f, reviewEmailInput.trim()); }}
+                            className="text-[11px] px-2 py-1 border border-slate-300 rounded outline-none focus:ring-1 focus:ring-violet-400 w-44"/>
+                          <button onClick={() => reviewEmailInput.includes("@") && handleAssign(f, reviewEmailInput.trim())}
+                            disabled={!reviewEmailInput.includes("@")}
+                            className="text-[11px] bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white px-2 py-1 rounded font-semibold transition-colors">
+                            Assign
+                          </button>
+                          <button onClick={() => { setReviewOpenFor(null); setReviewEmailInput(""); }}
+                            className="text-[11px] text-slate-400 hover:text-slate-600">Cancel</button>
+                        </div>
+                      )}
+                      <div className="ml-auto">
+                        <button onClick={(e) => { e.stopPropagation(); handleRectify(f); }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">
+                          <CheckCircle size={11}/>Mark Rectified
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 );
               })}
             </div>
           )}
 
-          {flags.length === 0 && (
+          {openFlags.length === 0 && (
             <div className="bg-emerald-50 border-2 border-emerald-200 rounded-xl p-6 text-center">
               <CheckCircle size={32} className="text-emerald-500 mx-auto mb-2"/>
-              <p className="text-emerald-700 font-semibold">All checks passed</p>
-              <p className="text-emerald-600 text-sm mt-1">No calculation discrepancies detected in current data.</p>
+              <p className="text-emerald-700 font-semibold">No open flags</p>
+              <p className="text-emerald-600 text-sm mt-1">
+                {rectifiedFlags.length > 0
+                  ? `${rectifiedFlags.length} flag(s) have been rectified — see below.`
+                  : "No calculation discrepancies detected in current data."}
+              </p>
+            </div>
+          )}
+
+          {/* Rectified history */}
+          {rectifiedFlags.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <button onClick={() => setShowRectified(v => !v)}
+                className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-50 transition-colors">
+                <span className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                  <CheckCircle size={14} className="text-emerald-500"/>
+                  Rectified ({rectifiedFlags.length})
+                </span>
+                <ChevronRight size={14} className={`text-slate-400 transition-transform ${showRectified ? "rotate-90" : ""}`}/>
+              </button>
+              {showRectified && (
+                <div className="border-t border-slate-100 p-3 space-y-2">
+                  {rectifiedFlags.map(f => {
+                    const fs = flagStates[f.id] || {};
+                    return (
+                      <div key={f.id} className="flex items-center gap-3 px-3 py-2 bg-emerald-50/40 border border-emerald-100 rounded-lg text-xs">
+                        <CheckCircle size={12} className="text-emerald-500 shrink-0"/>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-slate-700 truncate">{f.title}</p>
+                          <p className="text-[10px] text-slate-400">
+                            Rectified by {userLabel(fs.rectifiedBy) || "—"}
+                            {fs.rectifiedAt && ` · ${new Date(fs.rectifiedAt).toLocaleString()}`}
+                            {fs.assignedTo && ` · was assigned to ${userLabel(fs.assignedTo)}`}
+                          </p>
+                        </div>
+                        <button onClick={() => handleReopen(f)}
+                          className="text-[10px] text-amber-600 hover:text-amber-800 font-semibold underline">
+                          Reopen
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -3711,7 +3900,7 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
               </h3>
               <button
                 onClick={runAiReview}
-                disabled={aiLoading || flags.length === 0}
+                disabled={aiLoading || openFlags.length === 0}
                 className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
               >
                 {aiLoading ? <><Loader2 size={12} className="animate-spin"/>Reviewing…</> : <><Zap size={12}/>Get AI Assessment</>}
@@ -3723,8 +3912,8 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
               </div>
             ) : (
               <p className="text-slate-400 text-xs italic">
-                {flags.length === 0
-                  ? "Run the audit first to enable AI assessment."
+                {openFlags.length === 0
+                  ? (flags.length === 0 ? "Run the audit first to enable AI assessment." : "All flags rectified — nothing to review.")
                   : "Click \"Get AI Assessment\" to have Claude review these flags and provide a financial controller\'s assessment."}
               </p>
             )}
@@ -7707,7 +7896,7 @@ export default function App() {
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
-      {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments}/>}
+      {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
       {activeTab==="audit"     && <AuditLogView/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
