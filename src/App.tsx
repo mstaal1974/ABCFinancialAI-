@@ -4501,85 +4501,182 @@ function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
 
   const reportLabels = { board: "Board Pack", cfo: "CFO Commentary", operations: "Operations Summary" };
 
+  // Reporting period = last month for which we hold Xero actuals. Derived
+  // from MONTH_SCHEDULE so when more actuals are loaded the panel updates
+  // without a code change.
+  const fy26InOrder = useMemo(() => MONTH_SCHEDULE.filter(m => m.fy === "FY26"), []);
+  const closeMonths = useMemo(() => fy26InOrder.filter(m => ACTUALS_FY26_MKS.has(m.mk)), [fy26InOrder]);
+  const lastClose   = closeMonths[closeMonths.length - 1] || fy26InOrder[0];
+  const lastCloseMk    = lastClose?.mk || "Feb";
+  const lastCloseLabel = lastClose?.label || "Feb-26";
+  const monthName = (mk) => ({Jan:"January",Feb:"February",Mar:"March",Apr:"April",May:"May",Jun:"June",Jul:"July",Aug:"August",Sep:"September",Oct:"October",Nov:"November",Dec:"December"})[mk] || mk;
+  const reportingMonthLabel = `${monthName(lastCloseMk)} ${lastCloseLabel.endsWith("26") ? "2026" : (lastCloseLabel.endsWith("27") ? "2027" : "2028")}`;
+
+  const today = useMemo(() => new Date(), []);
+  const todayLabel = today.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+
   const generate = async () => {
     setLoading(true);
     try {
-      // Build comprehensive data snapshot
-      const ytdActual = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s, mk) => 
+      // ── YTD totals from actuals where we have them, model otherwise ──────
+      const ytdMks = closeMonths.map(m => m.mk);
+      const ytdActual = ytdMks.reduce((s, mk) =>
         s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (ACTUALS_FY26[ac.account]?.[mk] ?? ac.months[mk] ?? 0), 0), 0);
-      const ytdForecast = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s, mk) => 
+      const ytdForecast = ytdMks.reduce((s, mk) =>
         s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (ac.months[mk] || 0), 0), 0);
-      const ytdRevenue = data.regions.reduce((s, r) => s + r.monthlyData.slice(0,8).reduce((ss, m) => ss + (m.revenue||0), 0), 0);
-      const annualExpForecast = MONTH_SCHEDULE.filter(m=>m.fy==="FY26").reduce((s,{mk})=>
-        s + CHART_OF_ACCOUNTS.reduce((ss, ac)=>ss+(ac.months[mk]||0), 0), 0);
-      
-      // Top variances
+      const ytdRevenue = data.regions.reduce((s, r) =>
+        s + r.monthlyData.slice(0, ytdMks.length).reduce((ss, m) => ss + (m.revenue || 0), 0), 0);
+      const annualExpForecast = fy26InOrder.reduce((s,{mk}) =>
+        s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (ac.months[mk] || 0), 0), 0);
+
+      // YTD by section
+      const ytdBySection = ["Direct Costs","Overheads"].map(sec => {
+        const a = ytdMks.reduce((s,mk) => s + CHART_OF_ACCOUNTS.filter(ac=>ac.section===sec).reduce((ss,ac)=>ss+(ACTUALS_FY26[ac.account]?.[mk]??ac.months[mk]??0),0), 0);
+        const f = ytdMks.reduce((s,mk) => s + CHART_OF_ACCOUNTS.filter(ac=>ac.section===sec).reduce((ss,ac)=>ss+(ac.months[mk]||0),0), 0);
+        return { section: sec, actual: a, forecast: f, variance: a - f };
+      });
+
+      // ── Live operational financials (post-modellers) ────────────────────
+      const opFin = data.operationalFinancials || [];
+      const lastOp = opFin.find(op => op.month === lastCloseLabel) || opFin[opFin.length - 1];
+      const closingBal = lastOp?.closingBalance || 0;
+      const monthRev   = lastOp?.revenue || 0;
+      const monthPmt   = lastOp?.payments || 0;
+      const monthNet   = lastOp?.netCashflow || 0;
+
+      // Last 3 months trend (rev / pmt / net) ending at the last close
+      const closeIdx = opFin.findIndex(op => op.month === lastCloseLabel);
+      const trail3 = (closeIdx >= 0 ? opFin.slice(Math.max(0, closeIdx - 2), closeIdx + 1) : []).map(op =>
+        `${op.month}: rev $${Math.round(op.revenue||0).toLocaleString()} · pmt $${Math.round(op.payments||0).toLocaleString()} · net $${Math.round(op.netCashflow||0).toLocaleString()}`
+      ).join("\n");
+
+      // Region revenue mix (YTD share)
+      const regionMixYtd = data.regions.map(r => ({
+        region: r.region,
+        ytd: r.monthlyData.slice(0, ytdMks.length).reduce((s,m) => s + (m.revenue||0), 0),
+      }));
+      const regionMixTotal = regionMixYtd.reduce((s,r) => s + r.ytd, 0) || 1;
+      const regionMixStr = regionMixYtd
+        .filter(r => r.ytd > 0)
+        .sort((a,b) => b.ytd - a.ytd)
+        .map(r => `- ${r.region}: $${Math.round(r.ytd).toLocaleString()} (${Math.round(r.ytd/regionMixTotal*100)}%)`)
+        .join("\n");
+
+      // ── Top variances ────────────────────────────────────────────────────
       const topVariances = CHART_OF_ACCOUNTS.map(ac => {
-        const ytdA = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s,mk)=>s+(ACTUALS_FY26[ac.account]?.[mk]??ac.months[mk]??0),0);
-        const ytdF = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s,mk)=>s+(ac.months[mk]||0),0);
+        const ytdA = ytdMks.reduce((s,mk) => s + (ACTUALS_FY26[ac.account]?.[mk] ?? ac.months[mk] ?? 0), 0);
+        const ytdF = ytdMks.reduce((s,mk) => s + (ac.months[mk] || 0), 0);
         return { account: ac.account, section: ac.section, variance: ytdA - ytdF, ytdA, ytdF };
-      }).sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance)).slice(0,8);
+      }).sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance));
+      const topVarTop = topVariances.slice(0, 8);
+      const topVarOH  = topVariances.filter(v => v.section === "Overheads").slice(0, 8);
 
-      const systemPrompt = `You are a senior CFO writing financial reports for ABC Training's board and management. 
-Write in a professional, concise Australian business style. Use AUD currency. Be specific with numbers. 
-Today's date: 25 February 2026.`;
+      // ── Persona-specific system prompts ─────────────────────────────────
+      const baseContext = `You are writing for ABC Training, an Australian Registered Training Organisation (RTO). Use Australian English, AUD currency, and concrete numbers from the data provided. Today is ${todayLabel}; the reporting close month is ${reportingMonthLabel} (${lastCloseLabel}). Do not invent figures that aren't in the brief. Use markdown headings (##) for sections and bullet lists where helpful.`;
 
-      const prompts = {
-        board: `Write a Board Pack financial commentary for February 2026 board meeting.
+      const systemPrompts = {
+        board: `You are the Chief Financial Officer of ABC Training, drafting commentary for the monthly board pack. Tone: governance-grade, concise, board-appropriate — strategic framing, risk language, plain numbers, no operational minutiae. ${baseContext}`,
+        cfo:   `You are the Chief Financial Officer of ABC Training, writing an internal management commentary for the executive team. Tone: analytical and finance-deep — line-level variance analysis, cost ratios, cashflow drivers, calls to action with finance owner. ${baseContext}`,
+        operations: `You are the General Manager of Operations at ABC Training, writing an operations summary for department heads (training, sales, admin, facilities). Tone: plain English, action-oriented, owner/next-step focused — minimal accounting jargon, frame everything as what to do this week and this month. ${baseContext}`,
+      };
 
-YTD Performance (Jul-25 to Feb-26, 8 months):
+      // ── Shared data brief block (used by every prompt) ──────────────────
+      const dataBrief = `## DATA SNAPSHOT (FY26 YTD, ${ytdMks.length} months: ${ytdMks[0]}-25 to ${lastCloseMk}-26)
+
+YTD totals (live forecast post wage/CPI overrides):
 - YTD Revenue: $${Math.round(ytdRevenue).toLocaleString()}
 - YTD Actual Expenses: $${Math.round(ytdActual).toLocaleString()}
 - YTD Forecast Expenses: $${Math.round(ytdForecast).toLocaleString()}
 - YTD Expense Variance: ${ytdActual > ytdForecast ? "+" : ""}$${Math.round(ytdActual-ytdForecast).toLocaleString()} (${ytdActual > ytdForecast ? "OVER" : "UNDER"} budget)
 - FY26 Annual Expense Budget: $${Math.round(annualExpForecast).toLocaleString()}
 
+Last close month (${lastCloseLabel}):
+- Revenue: $${Math.round(monthRev).toLocaleString()}
+- Payments: $${Math.round(monthPmt).toLocaleString()}
+- Net cashflow: ${monthNet>=0?"+":""}$${Math.round(monthNet).toLocaleString()}
+- Closing cash balance: $${Math.round(closingBal).toLocaleString()}
+
+3-month trend ending ${lastCloseLabel}:
+${trail3 || "(no data)"}
+
+YTD by section:
+${ytdBySection.map(s => `- ${s.section}: actual $${Math.round(s.actual).toLocaleString()} vs forecast $${Math.round(s.forecast).toLocaleString()} (${s.variance>=0?"+":""}$${Math.round(s.variance).toLocaleString()})`).join("\n")}
+
 Top 8 expense variances YTD:
-${topVariances.map(v => `- ${v.account}: Actual $${Math.round(v.ytdA).toLocaleString()} vs Forecast $${Math.round(v.ytdF).toLocaleString()} (${v.variance>=0?"+":""}$${Math.round(v.variance).toLocaleString()})`).join("\n")}
+${topVarTop.map(v => `- ${v.account} (${v.section}): actual $${Math.round(v.ytdA).toLocaleString()} vs forecast $${Math.round(v.ytdF).toLocaleString()} (${v.variance>=0?"+":""}$${Math.round(v.variance).toLocaleString()})`).join("\n")}
 
-Write a formal board commentary with sections:
-1. Executive Summary (2-3 sentences)
-2. Financial Performance Overview
-3. Key Variances — Explanations and Actions
-4. Risks and Opportunities
-5. Outlook to June 2026
-6. Recommendations
+Revenue by region (YTD share):
+${regionMixStr || "- (none)"}`;
 
-Use professional board-level language. Be direct and actionable.`,
+      const prompts = {
+        board: `${dataBrief}
 
-        cfo: `Write a detailed CFO internal commentary for February 2026.
+Draft the ${reportingMonthLabel} board pack financial commentary for the upcoming board meeting. Use these sections (## headings):
 
-YTD Revenue: $${Math.round(ytdRevenue).toLocaleString()}
-YTD Actual Expenses: $${Math.round(ytdActual).toLocaleString()} vs Forecast $${Math.round(ytdForecast).toLocaleString()}
-Variance: ${ytdActual > ytdForecast ? "+" : ""}$${Math.round(ytdActual-ytdForecast).toLocaleString()}
+## Executive Summary
+2–3 sentences only — overall position vs plan, the one number to remember, and the single biggest risk or opportunity.
 
-Top variances:
-${topVariances.map(v => `- ${v.account}: ${v.variance>=0?"+":""}$${Math.round(v.variance).toLocaleString()}`).join("\n")}
+## Financial Performance Overview
+P&L position YTD, revenue trajectory, expense discipline, cash position vs the $200k minimum board threshold.
 
-Write a detailed CFO commentary covering:
-1. Month in Review — February highlights
-2. Line-by-line variance analysis for material items (>$5k variance)
-3. Cost efficiency metrics and ratios
-4. Cash flow observations
-5. Actions required before March month-end
-6. FY26 full-year forecast re-assessment`,
+## Key Variances — Explanations and Actions
+Cover the top 3–4 most material variances by dollar value. For each: what drove it, whether it is one-off vs structural, and the management action being taken.
 
-        operations: `Write an Operations Financial Summary for February 2026 for department heads.
+## Risks and Opportunities
+2–3 of each, framed for governance — not tactical.
 
-YTD Expenses: $${Math.round(ytdActual).toLocaleString()} vs Budget $${Math.round(ytdForecast).toLocaleString()}
+## Outlook to ${monthName(fy26InOrder[fy26InOrder.length-1].mk)} 2026
+Re-assert (or revise) the FY26 close forecast for revenue, expenses, and cash. State explicitly whether the board should expect an upgrade, hold, or downgrade vs prior guidance.
 
-Key operational cost items:
-${topVariances.filter(v=>v.section==="Overheads").map(v=>`- ${v.account}: $${Math.round(v.ytdA).toLocaleString()} actual vs $${Math.round(v.ytdF).toLocaleString()} forecast`).join("\n")}
+## Recommendations
+3 short bullets the board can vote/note on.`,
 
-Write an operations-focused summary with:
-1. What we spent vs what we planned (plain English)
-2. Areas where we need to reduce spending
-3. Areas where spending was efficient
-4. What department heads need to action this month
-5. Key metrics to track`
+        cfo: `${dataBrief}
+
+Write the CFO's internal management commentary for ${reportingMonthLabel}. This is for the leadership team, not the board — go deeper, name line items, and assign owners. Sections (## headings):
+
+## Month in Review
+Headline numbers for ${reportingMonthLabel} (revenue, payments, net, closing cash) and what changed vs January.
+
+## Line-by-Line Variance Analysis
+Walk every variance > $5,000 from the Top 8 list. For each: probable driver, classification (timing / pricing / volume / structural), and the action with a finance owner.
+
+## Cost Efficiency & Ratios
+Compute and comment on: opex-to-revenue, payroll-to-revenue (use staffing rows from the data brief), Direct Costs vs Overheads mix vs plan, and run-rate burn.
+
+## Cash & Working Capital
+Closing balance trajectory vs the $200k floor, near-term lumpy outflows (super, payroll tax), and any concerns for the next 13 weeks.
+
+## Pre Month-End Actions
+Specific items finance and budget owners must close before ${monthName(fy26InOrder[Math.min(fy26InOrder.length-1, closeMonths.length)]?.mk || "Mar")} month-end. Use a checklist.
+
+## FY26 Re-Forecast
+Given YTD trajectory, do we need to revise the FY26 expense or revenue forecast? Quantify.`,
+
+        operations: `${dataBrief}
+
+Write the GM of Operations' summary for ${reportingMonthLabel}, addressed to department heads (training, sales, admin, facilities). Plain English, no jargon, every observation must come with a clear next step and owner. Sections (## headings):
+
+## What We Spent vs What We Planned
+One paragraph in plain English. Use the YTD totals; translate into "$X more than planned because…" rather than accounting language.
+
+## Where Spending Was Tight (the wins)
+Up to 3 lines from Overheads where actual is well under forecast. Call out the team to thank.
+
+## Where We Need to Pull Back
+Up to 3 lines where Overheads are running over plan. For each: a concrete weekly/monthly cap, who owns the cap, and a review date.
+
+## Action List for Department Heads
+A short numbered list — each item has the owner role (e.g. "Training Manager", "Office Manager"), the action, and the due-by date.
+
+## Operational KPIs to Watch
+3–5 metrics each department head should track this month (e.g. travel spend per consultant, IT-services per FTE, course resources per enrolment). Use the data brief — do not invent ratios you can't compute from it.
+
+Top 8 Overhead variances available to draw from:
+${topVarOH.map(v => `- ${v.account}: actual $${Math.round(v.ytdA).toLocaleString()} vs forecast $${Math.round(v.ytdF).toLocaleString()} (${v.variance>=0?"+":""}$${Math.round(v.variance).toLocaleString()})`).join("\n")}`,
       };
 
-      const result = await callGemini(prompts[reportType], systemPrompt, 8192);
+      const result = await callGemini(prompts[reportType], systemPrompts[reportType], 8192);
       setNarrative(result);
     } catch (e) {
       console.error("Narrative error:", e);
@@ -4619,7 +4716,9 @@ Write an operations-focused summary with:
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-800">AI Monthly Narrative</h3>
-            <p className="text-[10px] text-slate-400">One-click CFO-style report generation · February 2026</p>
+            <p className="text-[10px] text-slate-400">
+              Reporting period <strong className="text-slate-600">{reportingMonthLabel}</strong> (last close {lastCloseLabel}) · as of {todayLabel}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
