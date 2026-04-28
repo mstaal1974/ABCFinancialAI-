@@ -509,6 +509,7 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
     balance = opening + net;
     return {
       month: label, fy, dateObj: parseDate(label),
+      revenue, baseRevenue,
       payments: pmt, netCashflow: net,
       openingBalance: opening, closingBalance: balance,
       filledStaffCostDelta, filledRevDelta,
@@ -586,10 +587,9 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], appl
     let lastDate=null;
     operationalFinancials.forEach(op => {
       if (isMonthInPeriod(op.dateObj, yearBasis, selectedYear)) {
-        // op.netCashflow = (baseRevenue + filledRevDelta) - (baseCosts + filledStaffCostDelta)
-        // Revenue = payments + net  (avoids double-deriving)
-        totalPayments+=op.payments; totalNetCashflow+=op.netCashflow;
-        totalRevenue+=(op.payments + op.netCashflow); // = actual revenue this month
+        totalRevenue+=op.revenue;
+        totalPayments+=op.payments;
+        totalNetCashflow+=op.netCashflow;
         if (!lastDate || op.dateObj>lastDate) {lastDate=op.dateObj; currentCash=op.closingBalance;}
       }
     });
@@ -612,7 +612,6 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], appl
     let projBal = null;
     return operationalFinancials.map((op,i) => {
       if (!isMonthInPeriod(op.dateObj, yearBasis, selectedYear)) return null;
-      const rev = regions.reduce((s,r) => s+(r.monthlyData[i]?.revenue||0), 0);
 
       // Compute planned hire impact for this month
       let planCost = 0, planRev = 0;
@@ -631,14 +630,14 @@ function DashboardOverview({data, yearBasis, selectedYear, hiringEvents=[], appl
 
       return {
         month: op.month,
-        revenue: rev,
+        revenue: op.revenue,
         payments: op.payments,
         netCashflow: op.netCashflow,
         cashPosition: op.closingBalance,
         projectedCash: plannedHires.length > 0 ? Math.round(projBal) : null,
       };
     }).filter(Boolean);
-  }, [regions, operationalFinancials, yearBasis, selectedYear, plannedHires, data.months]);
+  }, [operationalFinancials, yearBasis, selectedYear, plannedHires]);
 
   const variance = filtered.totalRevenue - filtered.totalBudget;
 
