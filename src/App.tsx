@@ -3923,6 +3923,319 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
     </div>
   );
 }
+// ═══════════════════════════════════════════════════════════════
+// CODE AUDIT AGENT — PATCH
+// Apply these 3 changes to your App.tsx
+// ═══════════════════════════════════════════════════════════════
+
+
+// ── CHANGE 1 ──────────────────────────────────────────────────
+// In the NAV array (search for id:"audit"), add this line BEFORE it:
+//
+  {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
+
+// Example — find this in your file:
+//   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
+// Change to:
+//   {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
+//   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
+
+
+// ── CHANGE 2 ──────────────────────────────────────────────────
+// In the tab renderer (search for activeTab==="audit"), add this line BEFORE it:
+//
+      {activeTab==="code-audit"  && <CodeAuditAgent/>}
+
+// Example — find this in your file:
+//   {activeTab==="audit"     && <AuditLogView/>}
+// Change to:
+//   {activeTab==="code-audit"  && <CodeAuditAgent/>}
+//   {activeTab==="audit"     && <AuditLogView/>}
+
+
+// ── CHANGE 3 ──────────────────────────────────────────────────
+// Add this entire component just BEFORE the line:
+//   function AuditLogView() {
+// (search for "function AuditLogView" and paste everything below it)
+
+
+// ─── CODE IMPROVEMENT AGENT ────────────────────────────────────────────────────
+function CodeAuditAgent() {
+  const [code, setCode] = useState("");
+  const [lang, setLang] = useState("TypeScript");
+  const [focus, setFocus] = useState(new Set(["readability","performance","best-practices","security","maintainability"]));
+  const [issues, setIssues] = useState([]);
+  const [expanded, setExpanded] = useState(new Set([0]));
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(null);
+
+  const EXAMPLE = `// User profile loader
+async function loadUserProfile(userId) {
+  var data = await fetch('/api/users/' + userId);
+  var json = await data.json();
+
+  var result = [];
+  for (var i = 0; i < json.permissions.length; i++) {
+    if (json.permissions[i] != null) {
+      result.push(json.permissions[i]);
+    }
+  }
+
+  if (json.role == 'admin') {
+    document.getElementById('adminPanel').style.display = 'block';
+    document.getElementById('adminPanel').innerHTML = json.adminMessage;
+  }
+
+  return {
+    id: json.id, name: json.name, email: json.email,
+    permissions: result, role: json.role,
+    createdAt: json.createdAt, updatedAt: json.updatedAt,
+  }
+}`;
+
+  const LANGS = ["TypeScript","JavaScript","Python","React/JSX","CSS","SQL","Go","Rust"];
+  const FOCUS_OPTS = ["readability","performance","best-practices","security","maintainability"];
+
+  const toggleFocus = (f) => setFocus(prev => {
+    const n = new Set(prev);
+    n.has(f) ? n.delete(f) : n.add(f);
+    return n;
+  });
+
+  const toggleExpand = (i) => setExpanded(prev => {
+    const n = new Set(prev);
+    n.has(i) ? n.delete(i) : n.add(i);
+    return n;
+  });
+
+  const copyCode = async (text, idx) => {
+    try { await navigator.clipboard.writeText(text); } catch {}
+    setCopied(idx);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
+  const sevOrder = {high:0, medium:1, low:2};
+  const sorted = [...issues].sort((a,b) => (sevOrder[a.severity]??3) - (sevOrder[b.severity]??3));
+
+  const runAnalysis = async () => {
+    if (!code.trim()) { setStatus("Paste some code first."); return; }
+    setLoading(true);
+    setIssues([]);
+    setExpanded(new Set([0]));
+    setStatus("Scanning code…");
+    const focusAreas = [...focus].join(", ");
+
+    const systemPrompt = `You are an expert code reviewer specialising in ${lang}. Analyse the provided code and return a JSON array of improvement suggestions.
+Each suggestion must have these exact fields:
+- "title": short descriptive title (max 8 words)
+- "severity": "high" | "medium" | "low"
+- "category": one of: Readability, Performance, Best practices, Security, Maintainability
+- "explanation": 1-2 sentence plain English explanation of WHY this is an issue
+- "before": the exact problematic snippet (5-20 lines)
+- "improved": the rewritten improved version
+Focus only on: ${focusAreas}.
+Return ONLY a valid JSON array. No markdown, no code fences, no commentary. Start with [ and end with ].
+Find 3-7 realistic, actionable issues. Prioritise high-impact improvements.`;
+
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: [{ role: "user", content: `Review this ${lang} code:\n\n${code}` }]
+        })
+      });
+      const data = await resp.json();
+      const raw = data.content?.find(c => c.type === "text")?.text || "[]";
+      let parsed = [];
+      try {
+        const clean = raw.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+        parsed = JSON.parse(clean);
+      } catch {
+        const m = raw.match(/\[[\s\S]*\]/);
+        parsed = m ? JSON.parse(m[0]) : [];
+      }
+      const valid = parsed.filter(i => i.title && i.before && i.improved);
+      setIssues(valid);
+      setStatus(valid.length ? `Found ${valid.length} issue${valid.length !== 1 ? "s" : ""} · click any card to expand` : "Analysis complete — no issues found.");
+    } catch(e) {
+      setStatus("Analysis failed: " + e.message);
+    }
+    setLoading(false);
+  };
+
+  const sevStyle = {
+    high:   { bg:"#FCEBEB", color:"#A32D2D", label:"High" },
+    medium: { bg:"#FAEEDA", color:"#854F0B", label:"Medium" },
+    low:    { bg:"#EAF3DE", color:"#3B6D11", label:"Low" },
+  };
+
+  const high = issues.filter(i=>i.severity==="high").length;
+  const med  = issues.filter(i=>i.severity==="medium").length;
+  const low  = issues.filter(i=>i.severity==="low").length;
+
+  return (
+    <div className="max-w-4xl space-y-5">
+      {/* Header */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <div className="flex items-center gap-3 mb-1">
+          <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center">
+            <FileText size={16} className="text-indigo-600"/>
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-slate-800">Code Improvement Agent</h2>
+            <p className="text-xs text-slate-400">Paste any code — get AI-powered suggestions with before/after examples</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Input */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+        {/* Language + textarea */}
+        <div className="relative">
+          <select
+            value={lang}
+            onChange={e => setLang(e.target.value)}
+            className="absolute top-2.5 right-2.5 z-10 text-xs bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 text-slate-600 focus:outline-none"
+          >
+            {LANGS.map(l => <option key={l}>{l}</option>)}
+          </select>
+          <textarea
+            value={code}
+            onChange={e => setCode(e.target.value)}
+            placeholder="Paste your code here…"
+            spellCheck={false}
+            className="w-full min-h-[200px] pr-32 p-3.5 font-mono text-xs leading-relaxed bg-slate-50 border border-slate-200 rounded-xl text-slate-800 resize-y focus:outline-none focus:border-indigo-300 focus:ring-1 focus:ring-indigo-200"
+          />
+        </div>
+
+        {/* Focus pills */}
+        <div>
+          <p className="text-[10px] text-slate-400 mb-2">Focus areas</p>
+          <div className="flex gap-2 flex-wrap">
+            {FOCUS_OPTS.map(f => (
+              <button
+                key={f}
+                onClick={() => toggleFocus(f)}
+                className={`text-[11px] px-3 py-1 rounded-full border transition-colors capitalize ${
+                  focus.has(f)
+                    ? "bg-indigo-50 border-indigo-300 text-indigo-700 font-medium"
+                    : "bg-white border-slate-200 text-slate-400"
+                }`}
+              >{f}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={runAnalysis}
+            disabled={loading}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
+          >
+            {loading
+              ? <><Loader2 size={13} className="animate-spin"/>Analysing…</>
+              : <><Shield size={13}/>Analyse code</>}
+          </button>
+          <button onClick={() => setCode(EXAMPLE)} className="text-xs px-3 py-2 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors">
+            Load example
+          </button>
+          <button onClick={() => { setCode(""); setIssues([]); setStatus(""); }} className="text-xs px-3 py-2 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors ml-auto">
+            Clear
+          </button>
+        </div>
+
+        {/* Status */}
+        {status && (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            {loading && <Loader2 size={11} className="animate-spin shrink-0"/>}
+            {status}
+          </div>
+        )}
+      </div>
+
+      {/* Summary bar */}
+      {issues.length > 0 && (
+        <div className="grid grid-cols-4 gap-3">
+          {[
+            { label: "Total", val: issues.length, color: "text-slate-800" },
+            { label: "High",   val: high, color: "text-red-600" },
+            { label: "Medium", val: med,  color: "text-amber-600" },
+            { label: "Low",    val: low,  color: "text-emerald-600" },
+          ].map(s => (
+            <div key={s.label} className="bg-white border border-slate-100 rounded-xl p-3.5 text-center">
+              <p className="text-[10px] text-slate-400 mb-0.5">{s.label}</p>
+              <p className={`text-2xl font-bold ${s.color}`}>{s.val}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Issue cards */}
+      {sorted.length > 0 && (
+        <div className="space-y-3">
+          {sorted.map((issue, idx) => {
+            const s = sevStyle[issue.severity] || sevStyle.low;
+            const isOpen = expanded.has(idx);
+            return (
+              <div key={idx} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                {/* Card header */}
+                <button
+                  onClick={() => toggleExpand(idx)}
+                  className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                >
+                  <span className="text-[10px] font-bold px-2.5 py-1 rounded-full flex-shrink-0" style={{ background: s.bg, color: s.color }}>{s.label}</span>
+                  <span className="text-[10px] px-2.5 py-1 rounded-full bg-slate-100 text-slate-500 flex-shrink-0">{issue.category}</span>
+                  <span className="text-sm font-medium text-slate-800 flex-1 text-left">{issue.title}</span>
+                  <ChevronRight size={13} className={`text-slate-400 flex-shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}/>
+                </button>
+
+                {/* Expanded body */}
+                {isOpen && (
+                  <div className="px-4 pb-4 space-y-3 border-t border-slate-100 pt-3">
+                    <p className="text-xs text-slate-600 leading-relaxed">{issue.explanation}</p>
+
+                    {/* Before */}
+                    <div>
+                      <p className="text-[10px] font-bold text-red-600 mb-1.5 uppercase tracking-wide">Current code</p>
+                      <pre className="text-[11px] leading-relaxed p-3 rounded-lg bg-red-50 border border-red-100 text-red-900 overflow-x-auto whitespace-pre-wrap break-all font-mono">{issue.before}</pre>
+                    </div>
+
+                    {/* After */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wide">Improved version</p>
+                        <button
+                          onClick={() => copyCode(issue.improved, idx)}
+                          className="text-[10px] px-2.5 py-1 rounded border border-slate-200 text-slate-500 hover:bg-slate-50 transition-colors"
+                        >{copied === idx ? "Copied!" : "Copy"}</button>
+                      </div>
+                      <pre className="text-[11px] leading-relaxed p-3 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-900 overflow-x-auto whitespace-pre-wrap break-all font-mono">{issue.improved}</pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Empty after analysis */}
+      {!loading && status && issues.length === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-8 text-center">
+          <CheckCircle size={28} className="text-emerald-500 mx-auto mb-2"/>
+          <p className="text-emerald-700 font-medium text-sm">No issues found</p>
+          <p className="text-emerald-600 text-xs mt-1">Code looks clean across all selected focus areas.</p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function AuditLogView() {
   const [logs, setLogs] = useState([]);
@@ -7563,6 +7876,7 @@ const NAV = [
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
   {id:"data",      label:"Raw Data",      icon:Table,           group:"Source"},
   {id:"calc-audit", label:"Calc Audit",    icon:Shield,          group:"Admin"},
+  {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
   {id:"aianalytics",label:"AI Analytics",  icon:Zap,             group:"Admin"},
 ];
@@ -8137,6 +8451,7 @@ export default function App() {
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
+      {activeTab==="code-audit"  && <CodeAuditAgent/>}
       {activeTab==="audit"     && <AuditLogView/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
