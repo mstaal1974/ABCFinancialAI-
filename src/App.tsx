@@ -3922,42 +3922,6 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
       )}
     </div>
   );
-}
-// ═══════════════════════════════════════════════════════════════
-// CODE AUDIT AGENT — PATCH
-// Apply these 3 changes to your App.tsx
-// ═══════════════════════════════════════════════════════════════
-
-
-// ── CHANGE 1 ──────────────────────────────────────────────────
-// In the NAV array (search for id:"audit"), add this line BEFORE it:
-//
-  {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
-
-// Example — find this in your file:
-//   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
-// Change to:
-//   {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
-//   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
-
-
-// ── CHANGE 2 ──────────────────────────────────────────────────
-// In the tab renderer (search for activeTab==="audit"), add this line BEFORE it:
-//
-      {activeTab==="code-audit"  && <CodeAuditAgent/>}
-
-// Example — find this in your file:
-//   {activeTab==="audit"     && <AuditLogView/>}
-// Change to:
-//   {activeTab==="code-audit"  && <CodeAuditAgent/>}
-//   {activeTab==="audit"     && <AuditLogView/>}
-
-
-// ── CHANGE 3 ──────────────────────────────────────────────────
-// Add this entire component just BEFORE the line:
-//   function AuditLogView() {
-// (search for "function AuditLogView" and paste everything below it)
-
 
 // ─── CODE IMPROVEMENT AGENT ────────────────────────────────────────────────────
 function CodeAuditAgent() {
