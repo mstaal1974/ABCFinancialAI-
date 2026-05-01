@@ -3921,6 +3921,7 @@ Please assess: (1) which flags most materially affect financial accuracy, (2) wh
       )}
     </div>
   );
+}
 
 // ─── CODE IMPROVEMENT AGENT ────────────────────────────────────────────────────
 function CodeAuditAgent() {
