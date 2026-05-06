@@ -1,6 +1,6 @@
 import { ArrowUpRight, Lock } from "lucide-react";
 import type { Fragrance } from "../lib/types";
-import Bottle from "./Bottle";
+import BottlePhoto from "./BottlePhoto";
 import BatchProgress from "./BatchProgress";
 import { formatPrice } from "../lib/data";
 
@@ -18,19 +18,22 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
       className="group h-full w-full text-left bg-obsidian-soft border border-obsidian-line hover:border-gold/40 transition-all duration-300 flex flex-col"
     >
       {/* Bottle stage — fixed pixel height so every card matches exactly,
-          regardless of grid column width. The bottle itself fills this box
-          via xMidYMax preserveAspectRatio in <Bottle />. */}
-      <div className="relative h-[360px] overflow-hidden bg-gradient-to-b from-obsidian to-obsidian-soft">
+          regardless of grid column width. */}
+      <div className="relative h-[360px] overflow-hidden bg-obsidian">
+        <div className="absolute inset-0 transition-transform duration-500 group-hover:scale-[1.03]">
+          <BottlePhoto
+            fragrance={fragrance}
+            crop="bottle"
+            className="h-full w-full"
+          />
+        </div>
         <div
           aria-hidden
-          className="absolute inset-0 opacity-60 transition-opacity duration-500 group-hover:opacity-100"
+          className="absolute inset-0 opacity-50 mix-blend-overlay transition-opacity duration-500 group-hover:opacity-80 pointer-events-none"
           style={{
-            background: `radial-gradient(70% 60% at 50% 80%, ${fragrance.accent}22, transparent 70%)`,
+            background: `radial-gradient(70% 60% at 50% 80%, ${fragrance.accent}33, transparent 70%)`,
           }}
         />
-        <div className="absolute inset-0 flex items-end justify-center pt-6 pb-2 transition-transform duration-500 group-hover:-translate-y-2">
-          <Bottle fragrance={fragrance} className="h-full w-auto" />
-        </div>
 
         {fragrance.vipOnly && (
           <span className="absolute top-3 left-3 inline-flex items-center gap-1 bg-obsidian/80 backdrop-blur-sm border border-gold/40 text-gold text-[10px] uppercase tracking-[0.22em] px-2 py-1">

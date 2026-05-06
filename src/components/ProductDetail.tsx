@@ -2,7 +2,7 @@ import { ArrowLeft, Check, Crown, CreditCard, Gift, Lock, Sparkles } from "lucid
 import { useMemo, useState } from "react";
 import type { Fragrance } from "../lib/types";
 import { formatPrice } from "../lib/data";
-import Bottle from "./Bottle";
+import BottlePhoto from "./BottlePhoto";
 import BatchProgress from "./BatchProgress";
 
 type Props = {
@@ -74,9 +74,18 @@ export default function ProductDetail({
                 background: `radial-gradient(60% 50% at 50% 60%, ${fragrance.accent}22, transparent 65%)`,
               }}
             />
-            <div className="aspect-[4/5] flex items-center justify-center bg-obsidian-soft border border-obsidian-line">
-              <Bottle fragrance={fragrance} customLabel={previewLabel} size="lg" />
-            </div>
+            <BottlePhoto
+              fragrance={fragrance}
+              customLabel={previewLabel}
+              crop="bottle"
+              className="border border-obsidian-line"
+            />
+            {/* Packaging tube alongside, at smaller size */}
+            <BottlePhoto
+              fragrance={fragrance}
+              crop="full"
+              className="mt-3 border border-obsidian-line"
+            />
             <p className="mt-4 sans text-[10px] uppercase tracking-[0.28em] text-cream/40 text-center">
               Live Preview · Engraving updates as you type
             </p>
