@@ -291,3 +291,89 @@ export function applyToCatalogue(
   }
   return Array.from(bySlug.values());
 }
+
+/** Convert a Fragrance object to the snake_case Supabase row payload. */
+function toFragranceRow(f: Fragrance) {
+  return {
+    id: f.id,
+    slug: f.slug,
+    name: f.name,
+    inspiration: f.inspiration,
+    tagline: f.tagline,
+    story: f.story,
+    concentration: f.concentration,
+    oil_percent: f.oilPercent,
+    volume_ml: f.volumeMl,
+    price_cents: f.priceCents,
+    comparison_price_cents: f.comparisonPriceCents ?? null,
+    gender: f.gender,
+    moq: f.moq,
+    committed: f.committed,
+    batch_closes_at: f.batchClosesAt,
+    vip_only: !!f.vipOnly,
+  };
+}
+
+/** Default visual palette for a brand-new fragrance. */
+export function blankFragrance(): Fragrance {
+  const visuals = VISUAL_PALETTE[0];
+  const id = `imp-${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    id,
+    slug: "",
+    name: "",
+    inspiration: "",
+    tagline: "",
+    story: "",
+    concentration: "Extrait de Parfum",
+    oilPercent: 30,
+    volumeMl: 50,
+    priceCents: 0,
+    comparisonPriceCents: undefined,
+    gender: "unisex",
+    moq: 20,
+    committed: 0,
+    batchClosesAt: new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString(),
+    notes: [],
+    bottleColor: visuals.bottleColor,
+    glassTint: visuals.glassTint,
+    liquidColor: visuals.liquidColor,
+    accent: visuals.accent,
+    vipOnly: false,
+  };
+}
+
+/** Slugify a string (re-exported helper for the form). */
+export function toSlug(s: string): string {
+  return slugify(s);
+}
+
+/**
+ * Insert a new fragrance row. Returns the saved fragrance (with any
+ * server-derived defaults) when Supabase is connected, or the local
+ * candidate when running in demo mode.
+ */
+export async function createFragrance(f: Fragrance): Promise<Fragrance> {
+  if (!isSupabaseEnabled || !supabase) return f;
+  const { error } = await supabase.from("fragrances").insert(toFragranceRow(f));
+  if (error) throw new Error(error.message);
+  return f;
+}
+
+/** Update an existing fragrance, matched by id. */
+export async function updateFragrance(f: Fragrance): Promise<Fragrance> {
+  if (!isSupabaseEnabled || !supabase) return f;
+  const { error } = await supabase
+    .from("fragrances")
+    .update(toFragranceRow(f))
+    .eq("id", f.id);
+  if (error) throw new Error(error.message);
+  return f;
+}
+
+/** Delete a fragrance by id. */
+export async function deleteFragrance(id: string): Promise<void> {
+  if (!isSupabaseEnabled || !supabase) return;
+  const { error } = await supabase.from("fragrances").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+}

@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Check, Database, FileSpreadsheet, Loader2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Database, FileSpreadsheet, Loader2, Pencil, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import {
   type ParsedRow,
@@ -10,6 +10,9 @@ import type { AuthUser } from "../lib/auth";
 import { formatPrice } from "../lib/data";
 import { isSupabaseEnabled } from "../lib/supabase";
 import type { Fragrance } from "../lib/types";
+import FragranceManager from "./FragranceManager";
+
+type Tab = "manage" | "import";
 
 type Props = {
   user: AuthUser | null;
@@ -35,6 +38,7 @@ export default function AdminPanel({
   onRequireAuth,
 }: Props) {
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
+  const [tab, setTab] = useState<Tab>("manage");
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function handleFile(file: File) {
@@ -89,18 +93,31 @@ export default function AdminPanel({
         <div className="mt-8 flex items-end justify-between gap-6 border-b border-obsidian-line pb-8">
           <div>
             <div className="sans text-[10px] uppercase tracking-[0.32em] text-gold/80">
-              Atelier Admin · Catalogue Import
+              Atelier Admin · Catalogue
             </div>
             <h1 className="mt-3 serif text-4xl lg:text-5xl text-cream">
-              Update the Vault from a spreadsheet.
+              {tab === "manage"
+                ? "Curate the Vault, fragrance by fragrance."
+                : "Update the Vault from a spreadsheet."}
             </h1>
             <p className="mt-3 sans text-[14px] text-cream/60 max-w-2xl leading-relaxed">
-              Upload an Excel or CSV file with one fragrance per row.
-              Required columns: <code className="text-gold">Scent Name</code>,
-              <code className="text-gold ml-1">Price</code>. Optional:
-              {" "}
-              <span className="text-cream/80">Sex, Inspired by, Description, Top notes, Heart notes, Base notes, Comparison.</span>{" "}
-              Existing fragrances are matched by slug and updated in place.
+              {tab === "manage" ? (
+                <>
+                  Add a new pour, edit an existing fragrance, or retire one
+                  from the catalogue. Changes sync to Supabase when connected.
+                </>
+              ) : (
+                <>
+                  Upload an Excel or CSV file with one fragrance per row.
+                  Required columns: <code className="text-gold">Scent Name</code>,
+                  <code className="text-gold ml-1">Price</code>. Optional:{" "}
+                  <span className="text-cream/80">
+                    Sex, Inspired by, Description, Top notes, Heart notes,
+                    Base notes, Comparison.
+                  </span>{" "}
+                  Existing fragrances are matched by slug and updated in place.
+                </>
+              )}
             </p>
           </div>
           <div className="hidden md:flex flex-col items-end gap-2 sans text-[11px] uppercase tracking-[0.22em] text-cream/55">
@@ -120,46 +137,102 @@ export default function AdminPanel({
           </div>
         </div>
 
-        {/* Upload zone */}
-        {(stage.kind === "idle" || stage.kind === "error") && (
-          <UploadZone
-            inputRef={fileRef}
-            error={stage.kind === "error" ? stage.message : null}
-            onFile={handleFile}
+        <div className="mt-6 flex items-center gap-1 border-b border-obsidian-line">
+          <TabButton
+            active={tab === "manage"}
+            onClick={() => setTab("manage")}
+            icon={<Pencil className="h-3.5 w-3.5" strokeWidth={1.6} />}
+            label="Manage individually"
+          />
+          <TabButton
+            active={tab === "import"}
+            onClick={() => setTab("import")}
+            icon={<FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={1.6} />}
+            label="Bulk import"
+          />
+        </div>
+
+        {tab === "manage" && (
+          <FragranceManager
+            fragrances={fragrances}
+            onCatalogueUpdated={onCatalogueUpdated}
           />
         )}
 
-        {stage.kind === "parsing" && (
-          <Status>
-            <Loader2 className="h-5 w-5 animate-spin text-gold" strokeWidth={1.6} />
-            Parsing spreadsheet…
-          </Status>
-        )}
+        {tab === "import" && (
+          <>
+            {(stage.kind === "idle" || stage.kind === "error") && (
+              <UploadZone
+                inputRef={fileRef}
+                error={stage.kind === "error" ? stage.message : null}
+                onFile={handleFile}
+              />
+            )}
 
-        {stage.kind === "preview" && (
-          <PreviewTable
-            rows={stage.rows}
-            headers={stage.headers}
-            unmappedHeaders={stage.unmappedHeaders}
-            fileName={stage.fileName}
-            onConfirm={handleConfirm}
-            onCancel={reset}
-            user={user}
-          />
-        )}
+            {stage.kind === "parsing" && (
+              <Status>
+                <Loader2 className="h-5 w-5 animate-spin text-gold" strokeWidth={1.6} />
+                Parsing spreadsheet…
+              </Status>
+            )}
 
-        {stage.kind === "uploading" && (
-          <Status>
-            <Loader2 className="h-5 w-5 animate-spin text-gold" strokeWidth={1.6} />
-            Upserting to catalogue…
-          </Status>
-        )}
+            {stage.kind === "preview" && (
+              <PreviewTable
+                rows={stage.rows}
+                headers={stage.headers}
+                unmappedHeaders={stage.unmappedHeaders}
+                fileName={stage.fileName}
+                onConfirm={handleConfirm}
+                onCancel={reset}
+                user={user}
+              />
+            )}
 
-        {stage.kind === "done" && (
-          <DoneCard inserted={stage.inserted} failed={stage.failed} rows={stage.rows} onReset={reset} />
+            {stage.kind === "uploading" && (
+              <Status>
+                <Loader2 className="h-5 w-5 animate-spin text-gold" strokeWidth={1.6} />
+                Upserting to catalogue…
+              </Status>
+            )}
+
+            {stage.kind === "done" && (
+              <DoneCard
+                inserted={stage.inserted}
+                failed={stage.failed}
+                rows={stage.rows}
+                onReset={reset}
+              />
+            )}
+          </>
         )}
       </div>
     </section>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`inline-flex items-center gap-2 px-4 h-10 sans text-[11px] uppercase tracking-[0.24em] transition-colors border-b-2 -mb-px ${
+        active
+          ? "border-gold text-gold"
+          : "border-transparent text-cream/55 hover:text-cream"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 
