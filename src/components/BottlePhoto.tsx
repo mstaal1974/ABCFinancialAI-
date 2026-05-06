@@ -88,12 +88,12 @@ function LabelOverlay({
   // photos — adjust if you swap them for a re-shoot.
   const pos =
     crop === "bottle"
-      ? // Single-bottle shot: panel sits dead-center horizontally,
-        // about 62% from the top of the frame, occupies ~33% width.
-        { left: "50%", top: "62%", width: "32%" }
-      : // Wide pair shot: bottle is on the left half. Panel center is
-        // around 21% from left and 50% from top, ~12% wide.
-        { left: "21%", top: "50%", width: "13%" };
+      ? // Single-bottle shot: panel is dead-center horizontally,
+        // ~60% from top, ~23% wide (matches the white rectangle).
+        { left: "50%", top: "60%", width: "23%" }
+      : // Wide pair shot: bottle is on the left half. White panel
+        // center is around 21% from left, 50% from top, ~10% wide.
+        { left: "21%", top: "50%", width: "10%" };
 
   return (
     <div
@@ -107,11 +107,13 @@ function LabelOverlay({
       aria-hidden
     >
       <div
-        className="serif font-medium text-obsidian leading-[1.05] tracking-tight whitespace-nowrap"
+        className="serif font-medium text-obsidian leading-none tracking-tight whitespace-nowrap"
         style={{
           // Container-query unit so the same component works tiny on a
-          // card (min ~5 px) and large on the PDP (~24 px).
-          fontSize: "clamp(7px, 4cqw, 26px)",
+          // card (min ~5 px) and large on the PDP (~18 px). Sized to
+          // keep even long names like "Tubéreuse Blanche" inside the
+          // white panel without overflowing.
+          fontSize: "clamp(6px, 2.6cqw, 18px)",
         }}
       >
         {fragrance.name}
@@ -119,9 +121,9 @@ function LabelOverlay({
 
       {engraved ? (
         <div
-          className="serif italic text-rust mt-[0.3em] leading-[1] truncate w-full"
+          className="serif italic text-rust mt-[0.25em] leading-none truncate w-full"
           style={{
-            fontSize: "clamp(6px, 2.6cqw, 16px)",
+            fontSize: "clamp(5px, 1.9cqw, 12px)",
           }}
         >
           {engraved}
