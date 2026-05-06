@@ -80,12 +80,6 @@ export default function ProductDetail({
               crop="bottle"
               className="w-full border border-obsidian-line"
             />
-            {/* Packaging tube alongside, at smaller size */}
-            <BottlePhoto
-              fragrance={fragrance}
-              crop="full"
-              className="mt-3 w-full border border-obsidian-line"
-            />
             <p className="mt-4 sans text-[10px] uppercase tracking-[0.28em] text-cream/40 text-center">
               Live Preview · Engraving updates as you type
             </p>
