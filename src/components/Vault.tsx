@@ -26,9 +26,9 @@ export default function Vault({ fragrances, vip, onOpen }: Props) {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-obsidian-line">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-obsidian-line auto-rows-fr">
           {fragrances.map((f) => (
-            <div key={f.id} className="bg-obsidian">
+            <div key={f.id} className="bg-obsidian flex">
               <FragranceCard fragrance={f} vip={vip} onOpen={() => onOpen(f.slug)} />
             </div>
           ))}

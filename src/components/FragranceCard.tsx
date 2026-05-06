@@ -15,9 +15,12 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
   return (
     <button
       onClick={onOpen}
-      className="group text-left bg-obsidian-soft border border-obsidian-line hover:border-gold/40 transition-all duration-300 flex flex-col"
+      className="group h-full w-full text-left bg-obsidian-soft border border-obsidian-line hover:border-gold/40 transition-all duration-300 flex flex-col"
     >
-      <div className="relative aspect-[5/6] overflow-hidden bg-gradient-to-b from-obsidian to-obsidian-soft flex items-end justify-center">
+      {/* Bottle stage — fixed pixel height so every card matches exactly,
+          regardless of grid column width. The bottle itself fills this box
+          via xMidYMax preserveAspectRatio in <Bottle />. */}
+      <div className="relative h-[360px] overflow-hidden bg-gradient-to-b from-obsidian to-obsidian-soft">
         <div
           aria-hidden
           className="absolute inset-0 opacity-60 transition-opacity duration-500 group-hover:opacity-100"
@@ -25,11 +28,9 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
             background: `radial-gradient(70% 60% at 50% 80%, ${fragrance.accent}22, transparent 70%)`,
           }}
         />
-        <Bottle
-          fragrance={fragrance}
-          size="md"
-          className="relative -mb-2 transition-transform duration-500 group-hover:-translate-y-2"
-        />
+        <div className="absolute inset-0 flex items-end justify-center pt-6 pb-2 transition-transform duration-500 group-hover:-translate-y-2">
+          <Bottle fragrance={fragrance} className="h-full w-auto" />
+        </div>
 
         {fragrance.vipOnly && (
           <span className="absolute top-3 left-3 inline-flex items-center gap-1 bg-obsidian/80 backdrop-blur-sm border border-gold/40 text-gold text-[10px] uppercase tracking-[0.22em] px-2 py-1">
@@ -44,23 +45,24 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
         )}
       </div>
 
+      {/* Content — uniform structure so all cards share the same row heights. */}
       <div className="p-5 flex flex-col gap-4 flex-1">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="sans text-[10px] uppercase tracking-[0.28em] text-cream/40">
+        <div className="flex items-start justify-between gap-3 min-h-[64px]">
+          <div className="min-w-0">
+            <div className="sans text-[10px] uppercase tracking-[0.28em] text-cream/40 truncate">
               {fragrance.inspiration}
             </div>
-            <h3 className="mt-1 serif text-2xl text-cream group-hover:text-gold transition-colors">
+            <h3 className="mt-1 serif text-2xl text-cream group-hover:text-gold transition-colors truncate">
               {fragrance.name}
             </h3>
           </div>
           <ArrowUpRight
-            className="h-4 w-4 text-cream/40 group-hover:text-gold transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+            className="h-4 w-4 text-cream/40 group-hover:text-gold transition-all group-hover:translate-x-0.5 group-hover:-translate-y-0.5 shrink-0 mt-1.5"
             strokeWidth={1.5}
           />
         </div>
 
-        <p className="sans text-[13px] leading-relaxed text-cream/60 line-clamp-2">
+        <p className="sans text-[13px] leading-relaxed text-cream/60 line-clamp-2 min-h-[40px]">
           {fragrance.tagline}
         </p>
 

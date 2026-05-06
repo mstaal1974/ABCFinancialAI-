@@ -3,6 +3,7 @@ import type { Fragrance } from "../lib/types";
 type Props = {
   fragrance: Fragrance;
   customLabel?: string | null;
+  /** When set, fixes intrinsic pixel size. Omit to let CSS (className) drive size. */
   size?: "sm" | "md" | "lg";
   className?: string;
 };
@@ -11,9 +12,20 @@ type Props = {
  * 2D apothecary bottle mockup. Pure SVG so the engraved label updates in
  * real time as the user types. The `accent` and `liquidColor` props vary
  * per fragrance to give the grid visual rhythm.
+ *
+ * Sizing: by default the SVG has no explicit width/height attributes, so
+ * it scales fluidly to whatever box (className) the parent provides. Pass
+ * `size` only on standalone usages (e.g. the product detail page).
  */
-export default function Bottle({ fragrance, customLabel, size = "md", className = "" }: Props) {
-  const dims = size === "lg" ? { w: 320, h: 480 } : size === "sm" ? { w: 120, h: 180 } : { w: 220, h: 340 };
+export default function Bottle({ fragrance, customLabel, size, className = "" }: Props) {
+  const dims =
+    size === "lg"
+      ? { w: 320, h: 480 }
+      : size === "sm"
+        ? { w: 120, h: 180 }
+        : size === "md"
+          ? { w: 220, h: 340 }
+          : null;
   const { accent, liquidColor, glassTint, name } = fragrance;
   const trimmedLabel = (customLabel ?? "").trim();
   const showLabel = trimmedLabel.length > 0;
@@ -21,8 +33,8 @@ export default function Bottle({ fragrance, customLabel, size = "md", className 
   return (
     <svg
       viewBox="0 0 220 340"
-      width={dims.w}
-      height={dims.h}
+      preserveAspectRatio="xMidYMax meet"
+      {...(dims ? { width: dims.w, height: dims.h } : {})}
       className={className}
       role="img"
       aria-label={`${name} bottle preview${showLabel ? ` — engraved with ${trimmedLabel}` : ""}`}
