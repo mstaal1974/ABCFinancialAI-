@@ -1,5 +1,7 @@
 export type Concentration = "Extrait de Parfum" | "Eau de Parfum" | "Eau de Toilette";
 
+export type Gender = "masculine" | "feminine" | "unisex";
+
 export type Note = {
   name: string;
   family: "top" | "heart" | "base";
@@ -16,6 +18,7 @@ export type Fragrance = {
   oilPercent: number; // e.g. 30
   volumeMl: number;
   priceCents: number;
+  gender: Gender;
   // Batch system
   moq: number;            // minimum order quantity to ship
   committed: number;      // current commits

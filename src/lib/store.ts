@@ -60,7 +60,11 @@ export function useFragrances() {
   useEffect(() => saveCommits(commits), [commits]);
 
   const commit = useCallback(
-    async (fragranceId: string, customLabel: string | null) => {
+    async (
+      fragranceId: string,
+      customLabel: string | null,
+      userMeta?: { userId?: string; userEmail?: string | null },
+    ) => {
       const newCommit: Commit = {
         id: crypto.randomUUID(),
         fragranceId,
@@ -82,6 +86,12 @@ export function useFragrances() {
           await supabase.from("commits").insert({
             id: newCommit.id,
             fragrance_id: fragranceId,
+            // Only include user_id when it's a real Supabase auth uuid.
+            user_id:
+              userMeta?.userId && !userMeta.userId.startsWith("demo-")
+                ? userMeta.userId
+                : null,
+            user_email: userMeta?.userEmail ?? null,
             custom_label: newCommit.customLabel,
             payment_intent_id: newCommit.paymentIntentId,
             status: newCommit.status,

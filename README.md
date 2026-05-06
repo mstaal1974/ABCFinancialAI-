@@ -35,26 +35,66 @@ src/
 ├── App.tsx                       Hash-routed shell (#/fragrance/:slug)
 ├── index.css                     Tailwind v4 + custom @theme tokens
 ├── components/
-│   ├── Header.tsx                Sticky nav with commit count + VIP badge
+│   ├── Header.tsx                Sticky nav · sign in / user menu / commits
 │   ├── Hero.tsx                  Atmospheric landing + 4 brand pillars
-│   ├── Vault.tsx                 Catalogue grid (3-up)
+│   ├── Vault.tsx                 Catalogue grid w/ All / Men's / Women's tabs
 │   ├── FragranceCard.tsx         Card with bottle preview + batch progress
 │   ├── BatchProgress.tsx         "12/20 spots filled" bar w/ shimmer
 │   ├── ProductDetail.tsx         Full PDP + Custom Label Engine + commit CTA
 │   ├── Bottle.tsx                SVG 2D bottle mockup w/ live engraving
+│   ├── SampleBox.tsx             Pick 5 vials → flat-fee discovery box
 │   ├── Education.tsx             "The Method" — 4 brand pillars
 │   ├── VIPClub.tsx               Subscription tier — early-access perks
 │   ├── CommitDrawer.tsx          Slide-out cart of authorized commits
+│   ├── AuthModal.tsx             Sign in / sign up · email + Google OAuth
 │   └── Footer.tsx
 └── lib/
-    ├── types.ts                  Domain types
+    ├── types.ts                  Domain types (Fragrance, Gender, Commit…)
     ├── data.ts                   Seed catalogue (mirrors SQL seed)
     ├── store.ts                  React hooks: useFragrances(), useVIP()
+    ├── auth.ts                   useAuth() — Supabase Auth w/ demo fallback
     ├── supabase.ts               Supabase client (null-safe)
     └── stripe.ts                 Authorize-now / capture-later stub
 supabase/
 └── migrations/0001_init.sql      Tables + RLS + auto-sync trigger + seed
 ```
+
+### Auth (email + Google)
+
+`src/lib/auth.ts` wraps Supabase Auth (`signInWithPassword`, `signUp`,
+`signInWithOAuth({ provider: "google" })`). The `<AuthModal>` exposes both
+flows. To enable Google sign-in:
+
+1. In your Supabase project: **Authentication → Providers → Google → Enable**.
+2. Paste a Google OAuth client ID / secret (created in the Google Cloud
+   Console with `https://<project>.supabase.co/auth/v1/callback` as an
+   authorized redirect URI).
+3. Add `http://localhost:5173` (and the production origin) to the
+   **Redirect URLs** allowlist.
+
+When Supabase auth is unreachable, the modal falls back to a local
+"demo user" so the UX flow is testable end-to-end. Demo users are not
+written to the `commits.user_id` column (it's nullable for that reason).
+
+### Collections (Men's / Women's)
+
+Each fragrance carries a `gender: "masculine" | "feminine" | "unisex"`
+field. The Vault has tabs:
+
+- **All Fragrances** — everything
+- **For Him** — `masculine` + `unisex`
+- **For Her** — `feminine` + `unisex`
+
+Unisex scents intentionally appear in both gendered tabs.
+
+### Sample Box
+
+`<SampleBox>` lets the customer pick exactly **5** fragrances at a flat
+$35 (`SAMPLE_BOX_PRICE_CENTS`). The selection grid disables further
+choices once five are picked, and the order requires sign-in. Submitted
+orders are written to `public.sample_box_orders` (an array column of
+fragrance ids — see migration). Stripe wiring uses the same authorize-now
+stub as commits.
 
 ### The Batch System
 

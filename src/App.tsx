@@ -7,7 +7,10 @@ import Education from "./components/Education";
 import VIPClub from "./components/VIPClub";
 import CommitDrawer from "./components/CommitDrawer";
 import Footer from "./components/Footer";
+import AuthModal from "./components/AuthModal";
+import SampleBox from "./components/SampleBox";
 import { useFragrances, useVIP } from "./lib/store";
+import { useAuth } from "./lib/auth";
 import { authorizePayment, notifyAdminBatchClosed } from "./lib/stripe";
 import { findFragrance } from "./lib/data";
 
@@ -22,11 +25,21 @@ function readRoute(): Route {
   return { kind: "home" };
 }
 
+const SECTION_IDS = {
+  vault: "vault",
+  samples: "samples",
+  education: "method",
+  vip: "vip",
+} as const;
+
 export default function App() {
   const { fragrances, commits, commit, releaseCommit } = useFragrances();
   const { vip, join, leave } = useVIP();
+  const { user, signOut } = useAuth();
   const [route, setRoute] = useState<Route>(() => readRoute());
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authReason, setAuthReason] = useState<string | undefined>();
 
   // Hash-based routing keeps the MVP single-page but shareable.
   useEffect(() => {
@@ -35,20 +48,22 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  function go(target: "home" | "vault" | "education" | "vip") {
+  function go(target: "home" | "vault" | "samples" | "education" | "vip") {
     if (target === "home") {
       window.location.hash = "";
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
-    if (target === "vault" && route.kind !== "home") {
+    const sectionId = SECTION_IDS[target];
+    if (route.kind !== "home") {
       window.location.hash = "";
-      // wait for route to update before scroll
-      setTimeout(() => document.getElementById("vault")?.scrollIntoView({ behavior: "smooth" }), 50);
+      setTimeout(
+        () => document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth" }),
+        50,
+      );
       return;
     }
-    const el = document.getElementById(target === "vault" ? "vault" : target === "education" ? "method" : "vip");
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function openProduct(slug: string) {
@@ -58,7 +73,15 @@ export default function App() {
 
   function closeProduct() {
     window.location.hash = "";
-    setTimeout(() => document.getElementById("vault")?.scrollIntoView({ behavior: "smooth" }), 50);
+    setTimeout(
+      () => document.getElementById(SECTION_IDS.vault)?.scrollIntoView({ behavior: "smooth" }),
+      50,
+    );
+  }
+
+  function requireAuth(reason?: string) {
+    setAuthReason(reason);
+    setAuthOpen(true);
   }
 
   const productFragrance = useMemo(
@@ -84,11 +107,18 @@ export default function App() {
 
   async function handleCommit(label: string | null) {
     if (!productFragrance) return;
+    if (!user) {
+      requireAuth("Sign in to reserve a spot in this batch.");
+      return;
+    }
     await authorizePayment({
       fragranceId: productFragrance.id,
       amountCents: productFragrance.priceCents,
     });
-    await commit(productFragrance.id, label);
+    await commit(productFragrance.id, label, {
+      userId: user.id,
+      userEmail: user.email,
+    });
     setDrawerOpen(true);
   }
 
@@ -100,7 +130,10 @@ export default function App() {
       <Header
         commitCount={commits.length}
         vip={vip}
+        user={user}
         onOpenCommits={() => setDrawerOpen(true)}
+        onOpenAuth={() => requireAuth()}
+        onSignOut={signOut}
         onNavigate={go}
       />
 
@@ -108,6 +141,13 @@ export default function App() {
         <>
           <Hero onEnterVault={() => go("vault")} />
           <Vault fragrances={fragrances} vip={vip} onOpen={openProduct} />
+          <SampleBox
+            fragrances={fragrances}
+            user={user}
+            onRequireAuth={() =>
+              requireAuth("Sign in to order your sample box.")
+            }
+          />
           <Education />
           <VIPClub vip={vip} onJoin={join} onLeave={leave} />
         </>
@@ -143,6 +183,12 @@ export default function App() {
         commits={commits}
         fragrances={fragrances}
         onRelease={releaseCommit}
+      />
+
+      <AuthModal
+        open={authOpen}
+        onClose={() => setAuthOpen(false)}
+        reason={authReason}
       />
     </div>
   );
