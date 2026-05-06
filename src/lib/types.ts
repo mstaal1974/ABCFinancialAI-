@@ -18,6 +18,8 @@ export type Fragrance = {
   oilPercent: number; // e.g. 30
   volumeMl: number;
   priceCents: number;
+  /** Designer fragrance reference price for comparison (optional). */
+  comparisonPriceCents?: number;
   gender: Gender;
   // Batch system
   moq: number;            // minimum order quantity to ship

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import Header from "./components/Header";
 import Hero from "./components/Hero";
 import Vault from "./components/Vault";
@@ -11,6 +11,9 @@ import AuthModal from "./components/AuthModal";
 import SampleBox from "./components/SampleBox";
 import GiftSection from "./components/GiftSection";
 import GiftRedeem from "./components/GiftRedeem";
+// Admin panel pulls in the xlsx parser (~600 KB). Lazy-load so the
+// storefront bundle stays small.
+const AdminPanel = lazy(() => import("./components/AdminPanel"));
 import { useFragrances, useVIP } from "./lib/store";
 import { useAuth } from "./lib/auth";
 import { useGifts } from "./lib/gifts";
@@ -20,7 +23,8 @@ import { findFragrance } from "./lib/data";
 type Route =
   | { kind: "home" }
   | { kind: "product"; slug: string }
-  | { kind: "gift"; code: string };
+  | { kind: "gift"; code: string }
+  | { kind: "admin" };
 
 function readRoute(): Route {
   const hash = window.location.hash.replace(/^#/, "");
@@ -28,8 +32,16 @@ function readRoute(): Route {
   if (product) return { kind: "product", slug: product[1] };
   const gift = hash.match(/^\/?gift\/([A-Z0-9-]+)/i);
   if (gift) return { kind: "gift", code: gift[1].toUpperCase() };
+  if (/^\/?admin\b/.test(hash)) return { kind: "admin" };
   return { kind: "home" };
 }
+
+// Comma-separated VITE_ADMIN_EMAILS in .env can restrict the admin panel.
+// When unset, any signed-in user can see it (useful for the local demo).
+const ADMIN_EMAILS = (import.meta.env.VITE_ADMIN_EMAILS as string | undefined)
+  ?.split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean) ?? [];
 
 const SECTION_IDS = {
   vault: "vault",
@@ -40,7 +52,7 @@ const SECTION_IDS = {
 } as const;
 
 export default function App() {
-  const { fragrances, commits, commit, releaseCommit } = useFragrances();
+  const { fragrances, setFragrances, commits, commit, releaseCommit } = useFragrances();
   const { vip, join, leave } = useVIP();
   const { user, signOut } = useAuth();
   const gifts = useGifts(user?.email ?? null);
@@ -213,6 +225,55 @@ export default function App() {
         />
       )}
 
+      {route.kind === "admin" &&
+        (() => {
+          const allowed =
+            !!user &&
+            (ADMIN_EMAILS.length === 0 ||
+              ADMIN_EMAILS.includes((user.email ?? "").toLowerCase()));
+          if (!user) {
+            return (
+              <AdminGate
+                title="Admin sign-in required"
+                body="Sign in with an authorised account to access the catalogue importer."
+                cta="Sign in"
+                onAction={() =>
+                  requireAuth("Sign in to access the admin importer.")
+                }
+                onBack={() => backHome()}
+              />
+            );
+          }
+          if (!allowed) {
+            return (
+              <AdminGate
+                title="Not authorised"
+                body={`This account (${user.email}) isn't on the admin allowlist.`}
+                cta="Return to storefront"
+                onAction={() => backHome()}
+                onBack={() => backHome()}
+              />
+            );
+          }
+          return (
+            <Suspense
+              fallback={
+                <div className="mx-auto max-w-3xl px-6 py-32 text-center sans text-[12px] uppercase tracking-[0.28em] text-cream/55">
+                  Loading admin tools…
+                </div>
+              }
+            >
+              <AdminPanel
+                user={user}
+                fragrances={fragrances}
+                onCatalogueUpdated={setFragrances}
+                onBack={() => backHome()}
+                onRequireAuth={() => requireAuth("Sign in to import fragrances.")}
+              />
+            </Suspense>
+          );
+        })()}
+
       <Footer />
 
       <CommitDrawer
@@ -229,5 +290,43 @@ export default function App() {
         reason={authReason}
       />
     </div>
+  );
+}
+
+function AdminGate({
+  title,
+  body,
+  cta,
+  onAction,
+  onBack,
+}: {
+  title: string;
+  body: string;
+  cta: string;
+  onAction: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <section className="mx-auto max-w-2xl px-6 py-32 text-center">
+      <div className="sans text-[10px] uppercase tracking-[0.32em] text-gold/80">
+        Admin
+      </div>
+      <h2 className="mt-3 serif text-4xl text-cream">{title}</h2>
+      <p className="mt-4 sans text-[14px] text-cream/65 leading-relaxed">{body}</p>
+      <div className="mt-8 flex items-center justify-center gap-3">
+        <button
+          onClick={onBack}
+          className="bg-obsidian-soft border border-obsidian-line hover:border-gold/40 text-cream px-5 h-11 sans text-[11px] uppercase tracking-[0.26em] transition-colors"
+        >
+          Back
+        </button>
+        <button
+          onClick={onAction}
+          className="bg-gold text-obsidian px-5 h-11 sans text-[11px] uppercase tracking-[0.26em] hover:bg-gold-soft transition-colors"
+        >
+          {cta}
+        </button>
+      </div>
+    </section>
   );
 }

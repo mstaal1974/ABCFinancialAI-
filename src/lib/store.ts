@@ -120,7 +120,7 @@ export function useFragrances() {
     });
   }, []);
 
-  return { fragrances, commits, commit, releaseCommit, loading };
+  return { fragrances, setFragrances, commits, commit, releaseCommit, loading };
 }
 
 export function useVIP() {

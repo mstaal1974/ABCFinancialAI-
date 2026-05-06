@@ -77,7 +77,14 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
           <span className="h-3 w-px bg-obsidian-line" />
           <span>{fragrance.volumeMl} ml</span>
           <span className="h-3 w-px bg-obsidian-line" />
-          <span>{formatPrice(fragrance.priceCents)}</span>
+          <span className="flex items-baseline gap-1.5">
+            <span>{formatPrice(fragrance.priceCents)}</span>
+            {fragrance.comparisonPriceCents && (
+              <span className="text-cream/35 line-through tabular-nums normal-case tracking-normal">
+                {formatPrice(fragrance.comparisonPriceCents)}
+              </span>
+            )}
+          </span>
         </div>
 
         <div className="mt-auto pt-2">

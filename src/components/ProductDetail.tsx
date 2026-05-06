@@ -112,6 +112,18 @@ export default function ProductDetail({
                 </div>
               ))}
             </dl>
+            {fragrance.comparisonPriceCents && (
+              <p className="mt-3 sans text-[12px] text-cream/55">
+                Compared to{" "}
+                <span className="text-cream tabular-nums">
+                  {formatPrice(fragrance.comparisonPriceCents)}
+                </span>{" "}
+                designer retail · save{" "}
+                <span className="text-gold tabular-nums">
+                  {formatPrice(fragrance.comparisonPriceCents - fragrance.priceCents)}
+                </span>
+              </p>
+            )}
 
             {/* Notes */}
             <div className="mt-10">
