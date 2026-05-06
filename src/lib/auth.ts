@@ -110,7 +110,11 @@ export function useAuth() {
     if (error) throw error;
   }
 
-  async function signUpWithEmail(email: string, password: string, name?: string) {
+  async function signUpWithEmail(
+    email: string,
+    password: string,
+    name?: string,
+  ): Promise<{ ok: true; needsConfirmation: boolean }> {
     if (!supabase) {
       const demo: AuthUser = {
         id: `demo-${crypto.randomUUID()}`,
@@ -121,14 +125,22 @@ export function useAuth() {
       };
       localStorage.setItem(DEMO_KEY, JSON.stringify(demo));
       setUser(demo);
-      return;
+      return { ok: true, needsConfirmation: false };
     }
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: name ? { full_name: name } : undefined },
+      options: {
+        emailRedirectTo: window.location.origin,
+        data: name ? { full_name: name } : undefined,
+      },
     });
     if (error) throw error;
+    // If the project has "Confirm email" enabled, Supabase returns the
+    // user but no session. Tell the caller so the UI can prompt the user
+    // to check their inbox instead of silently closing the modal.
+    const needsConfirmation = !data.session && !!data.user;
+    return { ok: true, needsConfirmation };
   }
 
   async function signOut() {

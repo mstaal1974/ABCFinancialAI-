@@ -1,4 +1,4 @@
-import { Loader2, Lock, Mail, X } from "lucide-react";
+import { Check, Loader2, Lock, Mail, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAuth } from "../lib/auth";
 
@@ -19,11 +19,15 @@ export default function AuthModal({ open, onClose, reason }: Props) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // After a sign-up that requires email confirmation we keep the modal
+  // open and show this message instead of silently closing.
+  const [confirmEmail, setConfirmEmail] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
       setErr(null);
       setBusy(false);
+      setConfirmEmail(null);
     }
   }, [open]);
 
@@ -38,6 +42,7 @@ export default function AuthModal({ open, onClose, reason }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    setConfirmEmail(null);
     if (!/^\S+@\S+\.\S+$/.test(email)) {
       setErr("Enter a valid email address.");
       return;
@@ -50,10 +55,18 @@ export default function AuthModal({ open, onClose, reason }: Props) {
     try {
       if (mode === "signin") {
         await signInWithEmail(email, password);
+        onClose();
       } else {
-        await signUpWithEmail(email, password, name || undefined);
+        const result = await signUpWithEmail(email, password, name || undefined);
+        if (result.needsConfirmation) {
+          // Confirm-email is on for this Supabase project; keep the modal
+          // open and surface the next step rather than appearing to close
+          // on a "no-op".
+          setConfirmEmail(email);
+        } else {
+          onClose();
+        }
       }
-      onClose();
     } catch (e) {
       const message =
         e instanceof Error ? e.message : "Authentication failed. Please try again.";
@@ -108,6 +121,44 @@ export default function AuthModal({ open, onClose, reason }: Props) {
               <X className="h-4 w-4" strokeWidth={1.5} />
             </button>
 
+            {confirmEmail ? (
+              <div className="px-8 pt-10 pb-8">
+                <div className="inline-flex items-center gap-2 px-3 py-1 border border-gold/50 text-gold text-[10px] uppercase tracking-[0.28em] sans">
+                  <Check className="h-3 w-3" strokeWidth={1.8} />
+                  Confirm your email
+                </div>
+                <h2 className="mt-4 serif text-3xl text-cream leading-tight">
+                  Check your inbox.
+                </h2>
+                <p className="mt-3 sans text-[14px] text-cream/65 leading-relaxed">
+                  We sent a confirmation link to{" "}
+                  <span className="text-gold">{confirmEmail}</span>. Click the
+                  link to finish creating your account, then come back and
+                  sign in.
+                </p>
+                <p className="mt-3 sans text-[12px] text-cream/45 leading-relaxed">
+                  Don't see it? Check your spam folder. The link expires in
+                  24 hours.
+                </p>
+                <div className="mt-7 flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      setConfirmEmail(null);
+                      setMode("signin");
+                    }}
+                    className="bg-gold text-obsidian px-5 h-11 sans text-[11px] uppercase tracking-[0.26em] hover:bg-gold-soft transition-colors"
+                  >
+                    Sign in
+                  </button>
+                  <button
+                    onClick={onClose}
+                    className="bg-obsidian-soft border border-obsidian-line hover:border-gold/40 text-cream px-5 h-11 sans text-[11px] uppercase tracking-[0.26em] transition-colors"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : (
             <div className="px-8 pt-10 pb-8">
               <div className="sans text-[10px] uppercase tracking-[0.32em] text-gold/80">
                 {mode === "signin" ? "The Atelier" : "Create an account"}
@@ -198,6 +249,7 @@ export default function AuthModal({ open, onClose, reason }: Props) {
                 </button>
               </p>
             </div>
+            )}
           </div>
         </div>
       </div>
