@@ -1,4 +1,4 @@
-import { Check, Loader2, Lock, Package, Sparkles } from "lucide-react";
+import { Check, Gift, Loader2, Lock, Package, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { SAMPLE_BOX_PRICE_CENTS, SAMPLE_BOX_SIZE, formatPrice } from "../lib/data";
@@ -8,10 +8,18 @@ import type { Fragrance } from "../lib/types";
 type Props = {
   fragrances: Fragrance[];
   user: AuthUser | null;
+  giftBalanceCents: number;
+  onApplyGift: (amountCents: number) => Promise<{ giftCents: number; chargeCents: number }>;
   onRequireAuth: () => void;
 };
 
-export default function SampleBox({ fragrances, user, onRequireAuth }: Props) {
+export default function SampleBox({
+  fragrances,
+  user,
+  giftBalanceCents,
+  onApplyGift,
+  onRequireAuth,
+}: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
@@ -20,6 +28,9 @@ export default function SampleBox({ fragrances, user, onRequireAuth }: Props) {
   const max = SAMPLE_BOX_SIZE;
   const remaining = max - selected.size;
   const ready = selected.size === max;
+
+  const giftApplied = Math.min(giftBalanceCents, SAMPLE_BOX_PRICE_CENTS);
+  const cardCharge = Math.max(0, SAMPLE_BOX_PRICE_CENTS - giftApplied);
 
   const visible = useMemo(() => fragrances, [fragrances]);
   const selectedFragrances = useMemo(
@@ -48,13 +59,17 @@ export default function SampleBox({ fragrances, user, onRequireAuth }: Props) {
     if (!ready) return;
     setSubmitting(true);
     try {
+      // Spend gift credit first; only the remainder hits the buyer's card.
+      const split = await onApplyGift(SAMPLE_BOX_PRICE_CENTS);
       if (isSupabaseEnabled && supabase) {
         try {
           await supabase.from("sample_box_orders").insert({
-            user_id: user.id,
+            user_id: user.id.startsWith("demo-") ? null : user.id,
             user_email: user.email,
             fragrance_ids: Array.from(selected),
             price_cents: SAMPLE_BOX_PRICE_CENTS,
+            gift_cents: split.giftCents,
+            charge_cents: split.chargeCents,
             status: "authorized",
           });
         } catch {
@@ -158,6 +173,21 @@ export default function SampleBox({ fragrances, user, onRequireAuth }: Props) {
                 </p>
               )}
 
+              {giftApplied > 0 && !done && (
+                <div className="mt-5 border border-gold/40 bg-gold/5 p-3 flex items-start gap-2 sans text-[12px] text-cream/75">
+                  <Gift className="h-3.5 w-3.5 text-gold mt-0.5 shrink-0" strokeWidth={1.6} />
+                  <span>
+                    <span className="text-gold tabular-nums">
+                      {formatPrice(giftApplied)}
+                    </span>{" "}
+                    gift credit applied ·{" "}
+                    {cardCharge > 0
+                      ? `card holds ${formatPrice(cardCharge)}`
+                      : "no card hold needed"}
+                  </span>
+                </div>
+              )}
+
               <button
                 onClick={handleSubmit}
                 disabled={!ready || submitting || done}
@@ -180,8 +210,17 @@ export default function SampleBox({ fragrances, user, onRequireAuth }: Props) {
                   </>
                 ) : ready ? (
                   <>
-                    <Sparkles className="h-3.5 w-3.5" strokeWidth={1.6} />
-                    Order Sample Box · {formatPrice(SAMPLE_BOX_PRICE_CENTS)}
+                    {cardCharge === 0 && giftApplied > 0 ? (
+                      <Gift className="h-3.5 w-3.5" strokeWidth={1.6} />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5" strokeWidth={1.6} />
+                    )}
+                    Order Sample Box ·{" "}
+                    {giftApplied > 0
+                      ? cardCharge === 0
+                        ? `${formatPrice(giftApplied)} gift`
+                        : `${formatPrice(cardCharge)} + ${formatPrice(giftApplied)} gift`
+                      : formatPrice(SAMPLE_BOX_PRICE_CENTS)}
                   </>
                 ) : (
                   <>Pick {remaining} more {remaining === 1 ? "fragrance" : "fragrances"}</>

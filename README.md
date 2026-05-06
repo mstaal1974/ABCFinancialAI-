@@ -43,6 +43,8 @@ src/
 │   ├── ProductDetail.tsx         Full PDP + Custom Label Engine + commit CTA
 │   ├── Bottle.tsx                SVG 2D bottle mockup w/ live engraving
 │   ├── SampleBox.tsx             Pick 5 vials → flat-fee discovery box
+│   ├── GiftSection.tsx           Buy a gift card by value, share via link
+│   ├── GiftRedeem.tsx            #/gift/<code> redemption screen
 │   ├── Education.tsx             "The Method" — 4 brand pillars
 │   ├── VIPClub.tsx               Subscription tier — early-access perks
 │   ├── CommitDrawer.tsx          Slide-out cart of authorized commits
@@ -53,10 +55,13 @@ src/
     ├── data.ts                   Seed catalogue (mirrors SQL seed)
     ├── store.ts                  React hooks: useFragrances(), useVIP()
     ├── auth.ts                   useAuth() — Supabase Auth w/ demo fallback
+    ├── gifts.ts                  useGifts() — purchase / redeem / apply balance
     ├── supabase.ts               Supabase client (null-safe)
     └── stripe.ts                 Authorize-now / capture-later stub
 supabase/
-└── migrations/0001_init.sql      Tables + RLS + auto-sync trigger + seed
+└── migrations/
+    ├── 0001_init.sql             Fragrances, commits, samples, subscribers
+    └── 0002_gifts.sql            Gift cards + claim RPC + order split cols
 ```
 
 ### Auth (email + Google)
@@ -95,6 +100,41 @@ choices once five are picked, and the order requires sign-in. Submitted
 orders are written to `public.sample_box_orders` (an array column of
 fragrance ids — see migration). Stripe wiring uses the same authorize-now
 stub as commits.
+
+### Send a Gift
+
+`<GiftSection>` lets a signed-in user purchase a gift card by **value**,
+not by bottle. Flow:
+
+1. Sender picks a preset ($35 / $185 / $225 / $500) or a custom amount
+   ($20–$2,000), enters recipient name + email, optional message and
+   delivery date.
+2. On purchase, a unique code (`MO-XXXX-XXXX`) is generated and the row
+   is inserted into `public.gift_cards`.
+3. The sender gets a confirmation card with the code + a shareable link
+   `/#/gift/<CODE>` (copy-to-clipboard).
+4. The recipient lands on the redemption screen (`<GiftRedeem>`),
+   signs in or signs up, and clicks "Add to my Wallet" — the card is
+   moved from `active` → `redeemed`.
+5. Their balance is shown as a chip in the header. At commit / sample
+   box checkout, gift credit is **applied first** and only the remainder
+   needs Stripe authorization (see `useGifts.applyBalance`). The
+   `commits` and `sample_box_orders` tables now have `gift_cents` and
+   `charge_cents` columns recording the split per order.
+
+Notes for production:
+
+- Gift purchases should run through a server route that creates a
+  Stripe charge **with immediate capture** (gift cards are non-refundable
+  digital goods, unlike batch commits) before inserting the row with the
+  service-role key.
+- Recipient email delivery is currently mocked (the confirmation card
+  shows the code/link). Wire to Resend / Postmark / SendGrid via a
+  scheduled job that respects `scheduled_for`.
+- The `claim_gift_card(code, email)` SQL function in
+  `0002_gifts.sql` is provided as a `security definer` helper so a
+  client can call it via Supabase RPC and avoid handing out generic
+  update privileges.
 
 ### The Batch System
 

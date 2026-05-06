@@ -48,3 +48,22 @@ export type Subscriber = {
   tier: "general" | "vip";
   createdAt: string;
 };
+
+export type GiftCardStatus = "active" | "redeemed" | "spent" | "expired";
+
+export type GiftCard = {
+  id: string;
+  code: string;              // human-readable, e.g. "MO-7K3X-PRZ8"
+  amountCents: number;       // original face value
+  balanceCents: number;      // remaining credit after redemptions
+  senderName: string;
+  senderEmail: string | null;
+  recipientName: string;
+  recipientEmail: string;
+  message: string | null;
+  status: GiftCardStatus;
+  scheduledFor: string | null; // ISO — null = send now
+  createdAt: string;
+  redeemedAt: string | null;
+  redeemedByEmail: string | null;
+};

@@ -9,25 +9,32 @@ import CommitDrawer from "./components/CommitDrawer";
 import Footer from "./components/Footer";
 import AuthModal from "./components/AuthModal";
 import SampleBox from "./components/SampleBox";
+import GiftSection from "./components/GiftSection";
+import GiftRedeem from "./components/GiftRedeem";
 import { useFragrances, useVIP } from "./lib/store";
 import { useAuth } from "./lib/auth";
+import { useGifts } from "./lib/gifts";
 import { authorizePayment, notifyAdminBatchClosed } from "./lib/stripe";
 import { findFragrance } from "./lib/data";
 
 type Route =
   | { kind: "home" }
-  | { kind: "product"; slug: string };
+  | { kind: "product"; slug: string }
+  | { kind: "gift"; code: string };
 
 function readRoute(): Route {
   const hash = window.location.hash.replace(/^#/, "");
-  const m = hash.match(/^\/?fragrance\/([\w-]+)/);
-  if (m) return { kind: "product", slug: m[1] };
+  const product = hash.match(/^\/?fragrance\/([\w-]+)/);
+  if (product) return { kind: "product", slug: product[1] };
+  const gift = hash.match(/^\/?gift\/([A-Z0-9-]+)/i);
+  if (gift) return { kind: "gift", code: gift[1].toUpperCase() };
   return { kind: "home" };
 }
 
 const SECTION_IDS = {
   vault: "vault",
   samples: "samples",
+  gift: "gift",
   education: "method",
   vip: "vip",
 } as const;
@@ -36,6 +43,7 @@ export default function App() {
   const { fragrances, commits, commit, releaseCommit } = useFragrances();
   const { vip, join, leave } = useVIP();
   const { user, signOut } = useAuth();
+  const gifts = useGifts(user?.email ?? null);
   const [route, setRoute] = useState<Route>(() => readRoute());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -48,7 +56,7 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  function go(target: "home" | "vault" | "samples" | "education" | "vip") {
+  function go(target: "home" | "vault" | "samples" | "gift" | "education" | "vip") {
     if (target === "home") {
       window.location.hash = "";
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -71,12 +79,17 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function closeProduct() {
+  function backHome(targetSection?: keyof typeof SECTION_IDS) {
     window.location.hash = "";
-    setTimeout(
-      () => document.getElementById(SECTION_IDS.vault)?.scrollIntoView({ behavior: "smooth" }),
-      50,
-    );
+    if (targetSection) {
+      setTimeout(
+        () =>
+          document.getElementById(SECTION_IDS[targetSection])?.scrollIntoView({ behavior: "smooth" }),
+        50,
+      );
+    } else {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
   }
 
   function requireAuth(reason?: string) {
@@ -111,10 +124,14 @@ export default function App() {
       requireAuth("Sign in to reserve a spot in this batch.");
       return;
     }
-    await authorizePayment({
-      fragranceId: productFragrance.id,
-      amountCents: productFragrance.priceCents,
-    });
+    // Apply any available gift balance first; only the remainder hits Stripe.
+    const split = await gifts.applyBalance(productFragrance.priceCents);
+    if (split.chargeCents > 0) {
+      await authorizePayment({
+        fragranceId: productFragrance.id,
+        amountCents: split.chargeCents,
+      });
+    }
     await commit(productFragrance.id, label, {
       userId: user.id,
       userEmail: user.email,
@@ -131,6 +148,7 @@ export default function App() {
         commitCount={commits.length}
         vip={vip}
         user={user}
+        giftBalanceCents={gifts.balanceCents}
         onOpenCommits={() => setDrawerOpen(true)}
         onOpenAuth={() => requireAuth()}
         onSignOut={signOut}
@@ -144,9 +162,16 @@ export default function App() {
           <SampleBox
             fragrances={fragrances}
             user={user}
+            giftBalanceCents={gifts.balanceCents}
+            onApplyGift={gifts.applyBalance}
             onRequireAuth={() =>
               requireAuth("Sign in to order your sample box.")
             }
+          />
+          <GiftSection
+            user={user}
+            onRequireAuth={requireAuth}
+            onPurchase={gifts.purchase}
           />
           <Education />
           <VIPClub vip={vip} onJoin={join} onLeave={leave} />
@@ -158,7 +183,8 @@ export default function App() {
           fragrance={productFragrance}
           vip={vip}
           alreadyCommitted={alreadyCommitted}
-          onBack={closeProduct}
+          giftBalanceCents={gifts.balanceCents}
+          onBack={() => backHome("vault")}
           onCommit={handleCommit}
         />
       )}
@@ -167,12 +193,24 @@ export default function App() {
         <div className="mx-auto max-w-3xl px-6 py-32 text-center">
           <h2 className="serif text-4xl text-cream">Fragrance not found</h2>
           <button
-            onClick={closeProduct}
+            onClick={() => backHome("vault")}
             className="mt-8 inline-block sans text-[11px] uppercase tracking-[0.28em] text-gold border-b border-gold/40 hover:border-gold pb-1"
           >
             Return to the Vault
           </button>
         </div>
+      )}
+
+      {route.kind === "gift" && (
+        <GiftRedeem
+          code={route.code}
+          user={user}
+          onLookup={gifts.lookup}
+          onRedeem={gifts.redeem}
+          onRequireAuth={requireAuth}
+          onBack={() => backHome()}
+          onEnterVault={() => backHome("vault")}
+        />
       )}
 
       <Footer />

@@ -1,21 +1,24 @@
-import { Crown, FlaskConical, LogOut, Menu, ShoppingBag, User as UserIcon, X } from "lucide-react";
+import { Crown, FlaskConical, Gift, LogOut, Menu, ShoppingBag, User as UserIcon, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { AuthUser } from "../lib/auth";
+import { formatPrice } from "../lib/data";
 
 type Props = {
   commitCount: number;
   vip: boolean;
   user: AuthUser | null;
+  giftBalanceCents: number;
   onOpenCommits: () => void;
   onOpenAuth: () => void;
   onSignOut: () => void;
-  onNavigate: (target: "vault" | "education" | "vip" | "samples" | "home") => void;
+  onNavigate: (target: "vault" | "education" | "vip" | "samples" | "gift" | "home") => void;
 };
 
 export default function Header({
   commitCount,
   vip,
   user,
+  giftBalanceCents,
   onOpenCommits,
   onOpenAuth,
   onSignOut,
@@ -58,6 +61,10 @@ export default function Header({
           <button onClick={() => onNavigate("samples")} className="hover:text-gold transition-colors">
             Sample Box
           </button>
+          <button onClick={() => onNavigate("gift")} className="hover:text-gold transition-colors flex items-center gap-1.5">
+            <Gift className="h-3.5 w-3.5" strokeWidth={1.4} />
+            Send a Gift
+          </button>
           <button onClick={() => onNavigate("education")} className="hover:text-gold transition-colors">
             The Method
           </button>
@@ -68,6 +75,15 @@ export default function Header({
         </nav>
 
         <div className="flex items-center gap-3 shrink-0">
+          {giftBalanceCents > 0 && (
+            <span
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 border border-gold/40 bg-gold/10 text-gold text-[10px] uppercase tracking-[0.2em] tabular-nums"
+              title="Gift balance available"
+            >
+              <Gift className="h-3 w-3" strokeWidth={1.5} />
+              {formatPrice(giftBalanceCents)}
+            </span>
+          )}
           {vip && (
             <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 border border-gold/40 text-gold text-[10px] uppercase tracking-[0.2em]">
               <Crown className="h-3 w-3" strokeWidth={1.5} /> VIP
@@ -160,6 +176,7 @@ export default function Header({
           <div className="px-6 py-4 flex flex-col gap-4 sans text-xs uppercase tracking-[0.22em] text-cream/80">
             <button onClick={() => { onNavigate("vault"); setMobile(false); }}>The Vault</button>
             <button onClick={() => { onNavigate("samples"); setMobile(false); }}>Sample Box</button>
+            <button onClick={() => { onNavigate("gift"); setMobile(false); }}>Send a Gift</button>
             <button onClick={() => { onNavigate("education"); setMobile(false); }}>The Method</button>
             <button onClick={() => { onNavigate("vip"); setMobile(false); }}>VIP Club</button>
             {!user && (

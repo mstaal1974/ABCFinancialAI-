@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, Crown, CreditCard, Lock, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, Crown, CreditCard, Gift, Lock, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Fragrance } from "../lib/types";
 import { formatPrice } from "../lib/data";
@@ -9,6 +9,7 @@ type Props = {
   fragrance: Fragrance;
   vip: boolean;
   alreadyCommitted: boolean;
+  giftBalanceCents: number;
   onBack: () => void;
   onCommit: (label: string | null) => Promise<void>;
 };
@@ -19,6 +20,7 @@ export default function ProductDetail({
   fragrance,
   vip,
   alreadyCommitted,
+  giftBalanceCents,
   onBack,
   onCommit,
 }: Props) {
@@ -29,6 +31,9 @@ export default function ProductDetail({
 
   const locked = !!fragrance.vipOnly && !vip;
   const previewLabel = labelEnabled ? label : "";
+
+  const giftApplied = Math.min(giftBalanceCents, fragrance.priceCents);
+  const cardCharge = Math.max(0, fragrance.priceCents - giftApplied);
 
   const groupedNotes = useMemo(() => {
     const top = fragrance.notes.filter((n) => n.family === "top");
@@ -184,6 +189,34 @@ export default function ProductDetail({
             {/* Batch + commit CTA */}
             <div className="mt-10">
               <BatchProgress fragrance={fragrance} />
+
+              {giftApplied > 0 && !alreadyCommitted && !done && (
+                <div className="mt-6 border border-gold/40 bg-gold/5 p-4 flex items-start gap-3">
+                  <Gift className="h-4 w-4 text-gold mt-0.5 shrink-0" strokeWidth={1.6} />
+                  <div className="flex-1">
+                    <div className="sans text-[10px] uppercase tracking-[0.26em] text-gold/90">
+                      Gift credit applied
+                    </div>
+                    <div className="mt-1 sans text-[13px] text-cream/80">
+                      <span className="text-gold tabular-nums">
+                        {formatPrice(giftApplied)}
+                      </span>{" "}
+                      from your wallet ·{" "}
+                      {cardCharge > 0 ? (
+                        <>
+                          your card holds{" "}
+                          <span className="text-cream tabular-nums">
+                            {formatPrice(cardCharge)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-cream">no card hold needed</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-6 grid gap-3">
                 <button
                   onClick={handleCommit}
@@ -202,10 +235,18 @@ export default function ProductDetail({
                     </>
                   ) : submitting ? (
                     <>Authorizing card…</>
+                  ) : cardCharge === 0 && giftApplied > 0 ? (
+                    <>
+                      <Gift className="h-4 w-4" strokeWidth={1.6} />
+                      Commit with Gift Credit · {formatPrice(giftApplied)}
+                    </>
                   ) : (
                     <>
                       <CreditCard className="h-4 w-4" strokeWidth={1.6} />
-                      Commit to this Batch · {formatPrice(fragrance.priceCents)}
+                      Commit to this Batch ·{" "}
+                      {giftApplied > 0
+                        ? `${formatPrice(cardCharge)} + ${formatPrice(giftApplied)} gift`
+                        : formatPrice(fragrance.priceCents)}
                     </>
                   )}
                 </button>
