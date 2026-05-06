@@ -17,19 +17,22 @@ export default function FragranceCard({ fragrance, vip, onOpen }: Props) {
       onClick={onOpen}
       className="group h-full w-full text-left bg-obsidian-soft border border-obsidian-line hover:border-gold/40 transition-all duration-300 flex flex-col"
     >
-      {/* Bottle stage — fixed pixel height so every card matches exactly,
-          regardless of grid column width. */}
-      <div className="relative h-[360px] overflow-hidden bg-obsidian">
-        <div className="absolute inset-0 transition-transform duration-500 group-hover:scale-[1.03]">
+      {/* Bottle stage — width-driven aspect so the photo and the
+          fragrance-name overlay stay pixel-aligned across all card sizes.
+          Every card in a row has the same column width, so all stages
+          have identical heights; auto-rows-fr on the grid then absorbs
+          any content variance. */}
+      <div className="relative w-full overflow-hidden bg-obsidian">
+        <div className="transition-transform duration-500 group-hover:scale-[1.03]">
           <BottlePhoto
             fragrance={fragrance}
             crop="bottle"
-            className="h-full w-full"
+            className="w-full"
           />
         </div>
         <div
           aria-hidden
-          className="absolute inset-0 opacity-50 mix-blend-overlay transition-opacity duration-500 group-hover:opacity-80 pointer-events-none"
+          className="absolute inset-0 opacity-40 mix-blend-overlay transition-opacity duration-500 group-hover:opacity-70 pointer-events-none"
           style={{
             background: `radial-gradient(70% 60% at 50% 80%, ${fragrance.accent}33, transparent 70%)`,
           }}
