@@ -91,8 +91,8 @@ function LabelOverlay({
     crop === "bottle"
       ? // Single-bottle shot (Fragrance Bottle 3.png): bottle is dead-
         // center horizontally. "MAISON OBSIDIAN" sits at ~54% from top;
-        // the blank amber space below it spans ~62%–72% from top.
-        { left: "50%", top: "66%", width: "20%" }
+        // the fragrance name sits just under it in the amber band.
+        { left: "50%", top: "60%", width: "26%" }
       : // Wide pair shot: bottle is on the left half. Brand mark is
         // around 21% from left, 50% from top.
         { left: "21%", top: "45%", width: "10%" };
@@ -116,7 +116,7 @@ function LabelOverlay({
           // on the PDP (~17 px). Drop-shadow keeps it readable over the
           // bottle's natural highlights.
           color: "#c9a961",
-          fontSize: "clamp(7px, 2.2cqw, 17px)",
+          fontSize: "clamp(10px, 3.4cqw, 26px)",
           textShadow: "0 1px 1px rgba(0,0,0,0.45)",
           wordBreak: "break-word",
         }}
