@@ -89,10 +89,11 @@ function LabelOverlay({
   // you swap them for a re-shoot.
   const pos =
     crop === "bottle"
-      ? // Single-bottle shot (Fragrance Bottle 3.png): bottle is dead-
-        // center horizontally. "MAISON OBSIDIAN" sits at ~54% from top;
-        // the fragrance name sits just under it in the amber band.
-        { left: "50%", top: "60%", width: "26%" }
+      ? // Single-bottle shot (Fragrance Bottle 3.png): the bottle's
+        // brand mark "MAISON / OBSIDIAN" sits centered at ~46% from
+        // left, ~54% from top. The fragrance name aligns to that same
+        // vertical axis, just under the brand, in the amber band.
+        { left: "46%", top: "60%", width: "26%" }
       : // Wide pair shot: bottle is on the left half. Brand mark is
         // around 21% from left, 50% from top.
         { left: "21%", top: "45%", width: "10%" };
