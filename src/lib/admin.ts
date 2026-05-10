@@ -251,24 +251,7 @@ export async function upsertFragrances(rows: ParsedRow[]): Promise<{
   if (!isSupabaseEnabled || !supabase) {
     return { inserted: 0, failed: 0 };
   }
-  const payload = valid.map((f) => ({
-    id: f.id,
-    slug: f.slug,
-    name: f.name,
-    inspiration: f.inspiration,
-    tagline: f.tagline,
-    story: f.story,
-    concentration: f.concentration,
-    oil_percent: f.oilPercent,
-    volume_ml: f.volumeMl,
-    price_cents: f.priceCents,
-    comparison_price_cents: f.comparisonPriceCents ?? null,
-    gender: f.gender,
-    moq: f.moq,
-    committed: f.committed,
-    batch_closes_at: f.batchClosesAt,
-    vip_only: !!f.vipOnly,
-  }));
+  const payload = valid.map((f) => toFragranceRow(f));
   const { error } = await supabase.from("fragrances").upsert(payload, {
     onConflict: "slug",
   });
@@ -311,6 +294,11 @@ function toFragranceRow(f: Fragrance) {
     committed: f.committed,
     batch_closes_at: f.batchClosesAt,
     vip_only: !!f.vipOnly,
+    notes: f.notes,
+    bottle_color: f.bottleColor,
+    glass_tint: f.glassTint,
+    liquid_color: f.liquidColor,
+    accent: f.accent,
   };
 }
 

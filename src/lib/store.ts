@@ -23,6 +23,11 @@ type FragranceRow = {
   committed: number | null;
   batch_closes_at: string | null;
   vip_only: boolean | null;
+  notes: Note[] | null;
+  bottle_color: string | null;
+  glass_tint: string | null;
+  liquid_color: string | null;
+  accent: string | null;
 };
 
 /**
@@ -53,11 +58,14 @@ function rowToFragrance(row: FragranceRow): Fragrance {
       row.batch_closes_at ??
       seedMatch?.batchClosesAt ??
       new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString(),
-    notes: seedMatch?.notes ?? ([] as Note[]),
-    bottleColor: seedMatch?.bottleColor ?? "#0e0e12",
-    glassTint: seedMatch?.glassTint ?? "#1a1a22",
-    liquidColor: seedMatch?.liquidColor ?? "#3b2a18",
-    accent: seedMatch?.accent ?? "#c9a961",
+    notes:
+      Array.isArray(row.notes) && row.notes.length > 0
+        ? row.notes
+        : seedMatch?.notes ?? ([] as Note[]),
+    bottleColor: row.bottle_color ?? seedMatch?.bottleColor ?? "#0e0e12",
+    glassTint: row.glass_tint ?? seedMatch?.glassTint ?? "#1a1a22",
+    liquidColor: row.liquid_color ?? seedMatch?.liquidColor ?? "#3b2a18",
+    accent: row.accent ?? seedMatch?.accent ?? "#c9a961",
     vipOnly: row.vip_only ?? seedMatch?.vipOnly ?? false,
   };
 }
