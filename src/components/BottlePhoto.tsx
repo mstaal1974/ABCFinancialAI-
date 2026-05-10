@@ -13,16 +13,17 @@ type Props = {
 };
 
 // URL-encoded paths because the source assets contain spaces.
-const SRC_BOTTLE = "/perfume%20bottle.jpg";    // ~511 × 561 single-bottle shot
-const SRC_FULL   = "/perfume%20bottle%202.png"; // wide pair shot (bottle + tube)
+const SRC_BOTTLE = "/Fragrance%20Bottle%203.png"; // amber bottle on black stand, gold MAISON OBSIDIAN label
+const SRC_FULL   = "/perfume%20bottle%202.png";   // wide pair shot (bottle + tube)
 
 /**
  * Real-product photograph used as the bottle visual. The fragrance name is
- * overlaid onto the bottle's blank white label panel; on the PDP the
- * customer's optional engraving appears underneath in cursive italic.
+ * overlaid in gold onto the blank space under the "MAISON OBSIDIAN" brand
+ * mark on the bottle; on the PDP an optional engraving appears underneath
+ * in cursive italic.
  *
  * Two crops:
- *  - "bottle" → /public/perfume bottle.jpg (single, ~1:1.1 portrait)
+ *  - "bottle" → /public/Fragrance Bottle 3.png (single, ~7:8 portrait)
  *  - "full"   → /public/perfume bottle 2.png (pair, ~16:9)
  *
  * If the photos move or are re-shot, only the SRC_* constants and the
@@ -37,7 +38,7 @@ export default function BottlePhoto({
   const [imgFailed, setImgFailed] = useState(false);
   const trimmedLabel = (customLabel ?? "").trim();
   // Match the source aspect ratios so nothing letterboxes.
-  const aspect = crop === "bottle" ? "511/561" : "16/9";
+  const aspect = crop === "bottle" ? "7/8" : "16/9";
   const src = crop === "bottle" ? SRC_BOTTLE : SRC_FULL;
 
   // Until/unless the photos load, fall back to the SVG bottle.
@@ -83,17 +84,18 @@ function LabelOverlay({
   fragrance: Fragrance;
   engraved: string;
 }) {
-  // Position of the bottle's blank white label panel, expressed as a
-  // percentage of the figure's box. Calibrated against the two source
-  // photos — adjust if you swap them for a re-shoot.
+  // Position of the gold name slot, expressed as a percentage of the
+  // figure's box. Calibrated against the two source photos — adjust if
+  // you swap them for a re-shoot.
   const pos =
     crop === "bottle"
-      ? // Single-bottle shot: panel is dead-center horizontally,
-        // ~60% from top, ~23% wide (matches the white rectangle).
-        { left: "50%", top: "60%", width: "23%" }
-      : // Wide pair shot: bottle is on the left half. White panel
-        // center is around 21% from left, 50% from top, ~10% wide.
-        { left: "21%", top: "50%", width: "10%" };
+      ? // Single-bottle shot (Fragrance Bottle 3.png): bottle is dead-
+        // center horizontally. "MAISON OBSIDIAN" sits at ~54% from top;
+        // the blank amber space below it spans ~62%–72% from top.
+        { left: "50%", top: "66%", width: "20%" }
+      : // Wide pair shot: bottle is on the left half. Brand mark is
+        // around 21% from left, 50% from top.
+        { left: "21%", top: "56%", width: "10%" };
 
   return (
     <div
@@ -107,13 +109,16 @@ function LabelOverlay({
       aria-hidden
     >
       <div
-        className="serif font-medium text-obsidian leading-none tracking-tight whitespace-nowrap"
+        className="serif font-medium leading-tight tracking-[0.08em] uppercase"
         style={{
-          // Container-query unit so the same component works tiny on a
-          // card (min ~5 px) and large on the PDP (~18 px). Sized to
-          // keep even long names like "Tubéreuse Blanche" inside the
-          // white panel without overflowing.
-          fontSize: "clamp(6px, 2.6cqw, 18px)",
+          // Gold name engraved into the amber glass. Container-query unit
+          // so the same component works tiny on a card (~7 px) and large
+          // on the PDP (~17 px). Drop-shadow keeps it readable over the
+          // bottle's natural highlights.
+          color: "#c9a961",
+          fontSize: "clamp(7px, 2.2cqw, 17px)",
+          textShadow: "0 1px 1px rgba(0,0,0,0.45)",
+          wordBreak: "break-word",
         }}
       >
         {fragrance.name}
@@ -121,9 +126,11 @@ function LabelOverlay({
 
       {engraved ? (
         <div
-          className="serif italic text-rust mt-[0.25em] leading-none truncate w-full"
+          className="serif italic mt-[0.4em] leading-none truncate w-full"
           style={{
-            fontSize: "clamp(5px, 1.9cqw, 12px)",
+            color: "#e9d9a8",
+            fontSize: "clamp(5px, 1.7cqw, 12px)",
+            textShadow: "0 1px 1px rgba(0,0,0,0.45)",
           }}
         >
           {engraved}
