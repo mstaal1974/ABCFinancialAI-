@@ -95,7 +95,7 @@ function LabelOverlay({
         { left: "50%", top: "66%", width: "20%" }
       : // Wide pair shot: bottle is on the left half. Brand mark is
         // around 21% from left, 50% from top.
-        { left: "21%", top: "56%", width: "10%" };
+        { left: "21%", top: "45%", width: "10%" };
 
   return (
     <div
