@@ -11,7 +11,9 @@ type Props = {
   onOpenCommits: () => void;
   onOpenAuth: () => void;
   onSignOut: () => void;
-  onNavigate: (target: "vault" | "education" | "vip" | "samples" | "gift" | "home") => void;
+  onNavigate: (
+    target: "vault" | "education" | "vip" | "samples" | "gift" | "subscription" | "home",
+  ) => void;
 };
 
 export default function Header({
@@ -64,6 +66,10 @@ export default function Header({
           <button onClick={() => onNavigate("gift")} className="hover:text-gold transition-colors flex items-center gap-1.5">
             <Gift className="h-3.5 w-3.5" strokeWidth={1.4} />
             Send a Gift
+          </button>
+          <button onClick={() => onNavigate("subscription")} className="hover:text-gold transition-colors flex items-center gap-1.5">
+            <Crown className="h-3.5 w-3.5" strokeWidth={1.4} />
+            Gift a Plan
           </button>
           <button onClick={() => onNavigate("education")} className="hover:text-gold transition-colors">
             The Method
@@ -177,6 +183,7 @@ export default function Header({
             <button onClick={() => { onNavigate("vault"); setMobile(false); }}>The Vault</button>
             <button onClick={() => { onNavigate("samples"); setMobile(false); }}>Sample Box</button>
             <button onClick={() => { onNavigate("gift"); setMobile(false); }}>Send a Gift</button>
+            <button onClick={() => { onNavigate("subscription"); setMobile(false); }}>Gift a Plan</button>
             <button onClick={() => { onNavigate("education"); setMobile(false); }}>The Method</button>
             <button onClick={() => { onNavigate("vip"); setMobile(false); }}>VIP Club</button>
             {!user && (

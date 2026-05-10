@@ -53,6 +53,42 @@ export type Subscriber = {
 
 export type GiftCardStatus = "active" | "redeemed" | "spent" | "expired";
 
+export type GiftSubscriptionPlanMonths = 3 | 6 | 12;
+
+export type GiftSubscriptionStatus =
+  | "active"      // purchased, awaiting redemption
+  | "redeemed"    // recipient has claimed it; picks may be in progress
+  | "completed"   // every monthly pick has been made
+  | "cancelled";
+
+export type GiftSubscriptionPick = {
+  id: string;
+  subscriptionId: string;
+  monthIndex: number;       // 1..planMonths
+  fragranceId: string;
+  pickedAt: string;
+  shipAt: string | null;
+  status: "queued" | "shipped" | "cancelled";
+};
+
+export type GiftSubscription = {
+  id: string;
+  code: string;              // human-readable, e.g. "MO-SUB-7K3X"
+  planMonths: GiftSubscriptionPlanMonths;
+  priceCents: number;
+  status: GiftSubscriptionStatus;
+  senderName: string;
+  senderEmail: string | null;
+  recipientName: string;
+  recipientEmail: string;
+  message: string | null;
+  scheduledFor: string | null;
+  createdAt: string;
+  redeemedAt: string | null;
+  redeemedByEmail: string | null;
+  picks: GiftSubscriptionPick[];
+};
+
 export type GiftCard = {
   id: string;
   code: string;              // human-readable, e.g. "MO-7K3X-PRZ8"

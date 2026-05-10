@@ -11,12 +11,15 @@ import AuthModal from "./components/AuthModal";
 import SampleBox from "./components/SampleBox";
 import GiftSection from "./components/GiftSection";
 import GiftRedeem from "./components/GiftRedeem";
+import GiftSubscriptionSection from "./components/GiftSubscriptionSection";
+import SubscriptionRedeem from "./components/SubscriptionRedeem";
 // Admin panel pulls in the xlsx parser (~600 KB). Lazy-load so the
 // storefront bundle stays small.
 const AdminPanel = lazy(() => import("./components/AdminPanel"));
 import { useFragrances, useVIP } from "./lib/store";
 import { useAuth } from "./lib/auth";
 import { useGifts } from "./lib/gifts";
+import { useGiftSubscriptions } from "./lib/giftSubscriptions";
 import { authorizePayment, notifyAdminBatchClosed } from "./lib/stripe";
 import { findFragrance } from "./lib/data";
 
@@ -24,12 +27,15 @@ type Route =
   | { kind: "home" }
   | { kind: "product"; slug: string }
   | { kind: "gift"; code: string }
+  | { kind: "subscription"; code: string }
   | { kind: "admin" };
 
 function readRoute(): Route {
   const hash = window.location.hash.replace(/^#/, "");
   const product = hash.match(/^\/?fragrance\/([\w-]+)/);
   if (product) return { kind: "product", slug: product[1] };
+  const subscription = hash.match(/^\/?subscription\/([A-Z0-9-]+)/i);
+  if (subscription) return { kind: "subscription", code: subscription[1].toUpperCase() };
   const gift = hash.match(/^\/?gift\/([A-Z0-9-]+)/i);
   if (gift) return { kind: "gift", code: gift[1].toUpperCase() };
   if (/^\/?admin\b/.test(hash)) return { kind: "admin" };
@@ -47,6 +53,7 @@ const SECTION_IDS = {
   vault: "vault",
   samples: "samples",
   gift: "gift",
+  subscription: "subscription",
   education: "method",
   vip: "vip",
 } as const;
@@ -56,6 +63,7 @@ export default function App() {
   const { vip, join, leave } = useVIP();
   const { user, signOut } = useAuth();
   const gifts = useGifts(user?.email ?? null);
+  const giftSubs = useGiftSubscriptions(user?.email ?? null);
   const [route, setRoute] = useState<Route>(() => readRoute());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -68,7 +76,9 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  function go(target: "home" | "vault" | "samples" | "gift" | "education" | "vip") {
+  function go(
+    target: "home" | "vault" | "samples" | "gift" | "subscription" | "education" | "vip",
+  ) {
     if (target === "home") {
       window.location.hash = "";
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -185,6 +195,11 @@ export default function App() {
             onRequireAuth={requireAuth}
             onPurchase={gifts.purchase}
           />
+          <GiftSubscriptionSection
+            user={user}
+            onRequireAuth={requireAuth}
+            onPurchase={giftSubs.purchase}
+          />
           <Education />
           <VIPClub vip={vip} onJoin={join} onLeave={leave} />
         </>
@@ -222,6 +237,19 @@ export default function App() {
           onRequireAuth={requireAuth}
           onBack={() => backHome()}
           onEnterVault={() => backHome("vault")}
+        />
+      )}
+
+      {route.kind === "subscription" && (
+        <SubscriptionRedeem
+          code={route.code}
+          user={user}
+          fragrances={fragrances}
+          onLookup={giftSubs.lookup}
+          onRedeem={giftSubs.redeem}
+          onPick={giftSubs.pickMonth}
+          onRequireAuth={requireAuth}
+          onBack={() => backHome()}
         />
       )}
 
