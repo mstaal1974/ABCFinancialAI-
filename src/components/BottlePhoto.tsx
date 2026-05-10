@@ -108,22 +108,9 @@ function LabelOverlay({
       }}
       aria-hidden
     >
-      <div
-        className="serif font-medium leading-tight tracking-[0.08em] uppercase"
-        style={{
-          // Gold name engraved into the amber glass. Container-query unit
-          // so the same component works tiny on a card (~7 px) and large
-          // on the PDP (~17 px). Drop-shadow keeps it readable over the
-          // bottle's natural highlights.
-          color: "#c9a961",
-          fontSize: "clamp(10px, 3.4cqw, 26px)",
-          textShadow: "0 1px 1px rgba(0,0,0,0.45)",
-          wordBreak: "break-word",
-        }}
-      >
-        {fragrance.name}
-      </div>
+      <NameLockup name={fragrance.name} />
 
+      {/* engraved follows */}
       {engraved ? (
         <div
           className="serif italic mt-[0.4em] leading-none truncate w-full"
@@ -136,6 +123,42 @@ function LabelOverlay({
           {engraved}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Renders the fragrance name as a centered gold lockup. Exactly two-word
+ * names are stacked one word per line (matching the "MAISON / OBSIDIAN"
+ * treatment on the bottle); single-word or 3+ word names stay on one
+ * line with natural wrapping.
+ */
+function NameLockup({ name }: { name: string }) {
+  const words = name.trim().split(/\s+/);
+  const stack = words.length === 2;
+  const sharedStyle: React.CSSProperties = {
+    color: "#c9a961",
+    fontSize: "clamp(10px, 3.4cqw, 26px)",
+    textShadow: "0 1px 1px rgba(0,0,0,0.45)",
+  };
+  const className =
+    "serif font-medium leading-tight tracking-[0.08em] uppercase text-center w-full";
+
+  if (stack) {
+    return (
+      <div className="flex flex-col items-center w-full">
+        <div className={className} style={sharedStyle}>{words[0]}</div>
+        <div className={className} style={sharedStyle}>{words[1]}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={className}
+      style={{ ...sharedStyle, wordBreak: "break-word" }}
+    >
+      {name}
     </div>
   );
 }
