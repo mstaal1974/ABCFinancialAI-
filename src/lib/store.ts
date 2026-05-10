@@ -1,10 +1,66 @@
 import { useEffect, useState, useCallback } from "react";
-import type { Commit, Fragrance } from "./types";
+import type { Commit, Concentration, Fragrance, Gender, Note } from "./types";
 import { FRAGRANCES } from "./data";
 import { supabase, isSupabaseEnabled } from "./supabase";
 
 const COMMITS_KEY = "mo:commits:v1";
 const VIP_KEY = "mo:vip:v1";
+
+type FragranceRow = {
+  id: string;
+  slug: string;
+  name: string;
+  inspiration: string | null;
+  tagline: string | null;
+  story: string | null;
+  concentration: string | null;
+  oil_percent: number | null;
+  volume_ml: number | null;
+  price_cents: number;
+  comparison_price_cents: number | null;
+  gender: string | null;
+  moq: number;
+  committed: number | null;
+  batch_closes_at: string | null;
+  vip_only: boolean | null;
+};
+
+/**
+ * Rebuild a full Fragrance from a Supabase row. Visuals (colors) aren't
+ * stored in the DB, so fall back to the matching seed entry by slug — or
+ * a sensible default palette for fragrances created via the admin.
+ */
+function rowToFragrance(row: FragranceRow): Fragrance {
+  const seedMatch = FRAGRANCES.find((s) => s.slug === row.slug);
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    inspiration: row.inspiration ?? seedMatch?.inspiration ?? "",
+    tagline: row.tagline ?? seedMatch?.tagline ?? "",
+    story: row.story ?? seedMatch?.story ?? "",
+    concentration: (row.concentration as Concentration | null) ??
+      seedMatch?.concentration ?? "Extrait de Parfum",
+    oilPercent: row.oil_percent ?? seedMatch?.oilPercent ?? 30,
+    volumeMl: row.volume_ml ?? seedMatch?.volumeMl ?? 50,
+    priceCents: row.price_cents,
+    comparisonPriceCents:
+      row.comparison_price_cents ?? seedMatch?.comparisonPriceCents,
+    gender: (row.gender as Gender | null) ?? seedMatch?.gender ?? "unisex",
+    moq: row.moq,
+    committed: row.committed ?? 0,
+    batchClosesAt:
+      row.batch_closes_at ??
+      seedMatch?.batchClosesAt ??
+      new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString(),
+    notes: seedMatch?.notes ?? ([] as Note[]),
+    bottleColor: seedMatch?.bottleColor ?? "#0e0e12",
+    glassTint: seedMatch?.glassTint ?? "#1a1a22",
+    liquidColor: seedMatch?.liquidColor ?? "#3b2a18",
+    accent: seedMatch?.accent ?? "#c9a961",
+    vipOnly: row.vip_only ?? seedMatch?.vipOnly ?? false,
+  };
+}
 
 function loadCommits(): Commit[] {
   try {
@@ -29,7 +85,9 @@ export function useFragrances() {
   const [commits, setCommits] = useState<Commit[]>(() => loadCommits());
   const [loading, setLoading] = useState(false);
 
-  // Pull live counts from Supabase if configured.
+  // Pull the full catalogue from Supabase if configured. Supabase rows
+  // win over the seed when slugs match, and any extra rows (e.g. created
+  // via the admin) are appended.
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -39,14 +97,10 @@ export function useFragrances() {
         const { data, error } = await supabase.from("fragrances").select("*");
         if (error || !data || data.length === 0) return;
         if (cancelled) return;
-        // Merge live committed counts onto our seed list (so a missing row
-        // doesn't blank the catalogue during the demo).
-        setFragrances((prev) =>
-          prev.map((f) => {
-            const live = data.find((r: { id: string }) => r.id === f.id);
-            return live ? { ...f, committed: live.committed ?? f.committed } : f;
-          }),
-        );
+        const live = (data as FragranceRow[]).map(rowToFragrance);
+        const bySlug = new Map(FRAGRANCES.map((f) => [f.slug, f]));
+        for (const f of live) bySlug.set(f.slug, f);
+        setFragrances(Array.from(bySlug.values()));
       } finally {
         if (!cancelled) setLoading(false);
       }

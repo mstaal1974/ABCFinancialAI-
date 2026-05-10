@@ -59,7 +59,8 @@ const SECTION_IDS = {
 } as const;
 
 export default function App() {
-  const { fragrances, setFragrances, commits, commit, releaseCommit } = useFragrances();
+  const { fragrances, setFragrances, commits, commit, releaseCommit, loading: fragrancesLoading } =
+    useFragrances();
   const { vip, join, leave } = useVIP();
   const { user, signOut } = useAuth();
   const gifts = useGifts(user?.email ?? null);
@@ -120,8 +121,11 @@ export default function App() {
   }
 
   const productFragrance = useMemo(
-    () => (route.kind === "product" ? findFragrance(route.slug) : undefined),
-    [route],
+    () =>
+      route.kind === "product"
+        ? fragrances.find((f) => f.slug === route.slug) ?? findFragrance(route.slug)
+        : undefined,
+    [route, fragrances],
   );
 
   // When a batch crosses MOQ, fire the admin notification + capture stub.
@@ -216,7 +220,13 @@ export default function App() {
         />
       )}
 
-      {route.kind === "product" && !productFragrance && (
+      {route.kind === "product" && !productFragrance && fragrancesLoading && (
+        <div className="mx-auto max-w-3xl px-6 py-32 text-center sans text-[12px] uppercase tracking-[0.28em] text-cream/55">
+          Loading fragrance…
+        </div>
+      )}
+
+      {route.kind === "product" && !productFragrance && !fragrancesLoading && (
         <div className="mx-auto max-w-3xl px-6 py-32 text-center">
           <h2 className="serif text-4xl text-cream">Fragrance not found</h2>
           <button
