@@ -1,21 +1,40 @@
-import { Trash2, X } from "lucide-react";
+import { PackageSearch, Trash2, X } from "lucide-react";
+import type { AuthUser } from "../lib/auth";
+import { useUserShipments } from "../lib/shipments";
 import type { Commit, Fragrance } from "../lib/types";
 import { formatPrice } from "../lib/data";
+import ShipmentBadge from "./ShipmentBadge";
 
 type Props = {
   open: boolean;
   onClose: () => void;
   commits: Commit[];
   fragrances: Fragrance[];
+  user: AuthUser | null;
   onRelease: (id: string) => void;
+  onOpenOrders: () => void;
 };
 
-export default function CommitDrawer({ open, onClose, commits, fragrances, onRelease }: Props) {
+export default function CommitDrawer({
+  open,
+  onClose,
+  commits,
+  fragrances,
+  user,
+  onRelease,
+  onOpenOrders,
+}: Props) {
   const lookup = (id: string) => fragrances.find((f) => f.id === id);
   const total = commits.reduce((sum, c) => {
     const f = lookup(c.fragranceId);
     return sum + (f?.priceCents ?? 0);
   }, 0);
+  const { shipments } = useUserShipments(user?.email ?? null);
+  const shipmentByCommit = new Map(
+    shipments
+      .filter((s) => s.sourceType === "commit")
+      .map((s) => [s.sourceId, s]),
+  );
 
   return (
     <div
@@ -90,6 +109,11 @@ export default function CommitDrawer({ open, onClose, commits, fragrances, onRel
                           “{c.customLabel}”
                         </div>
                       )}
+                      {shipmentByCommit.get(c.id) && (
+                        <div className="mt-3">
+                          <ShipmentBadge status={shipmentByCommit.get(c.id)!.status} />
+                        </div>
+                      )}
                       <div className="mt-3 flex items-center justify-between sans text-[10px] uppercase tracking-[0.22em] text-cream/40">
                         <span className="text-gold/80">Authorized · awaiting batch</span>
                         <button
@@ -123,12 +147,21 @@ export default function CommitDrawer({ open, onClose, commits, fragrances, onRel
               You'll only ever be charged for fragrances whose batches reach
               their MOQ.
             </p>
-            <button
-              onClick={onClose}
-              className="w-full bg-obsidian-soft border border-obsidian-line text-cream h-11 sans text-[11px] uppercase tracking-[0.28em] hover:border-gold/50 transition-colors"
-            >
-              Continue Browsing the Vault
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={onClose}
+                className="bg-obsidian-soft border border-obsidian-line text-cream h-11 sans text-[11px] uppercase tracking-[0.28em] hover:border-gold/50 transition-colors"
+              >
+                Keep Browsing
+              </button>
+              <button
+                onClick={onOpenOrders}
+                className="inline-flex items-center justify-center gap-1.5 bg-obsidian-soft border border-obsidian-line text-cream h-11 sans text-[11px] uppercase tracking-[0.28em] hover:border-gold/50 transition-colors"
+              >
+                <PackageSearch className="h-3.5 w-3.5" strokeWidth={1.5} />
+                My Orders
+              </button>
+            </div>
           </footer>
         )}
       </aside>

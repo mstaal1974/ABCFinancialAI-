@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Check, Database, FileSpreadsheet, Loader2, Pencil, Upload } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Database, FileSpreadsheet, Loader2, Pencil, Truck, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import {
   type ParsedRow,
@@ -11,8 +11,9 @@ import { formatPrice } from "../lib/data";
 import { isSupabaseEnabled } from "../lib/supabase";
 import type { Fragrance } from "../lib/types";
 import FragranceManager from "./FragranceManager";
+import ShipmentManager from "./ShipmentManager";
 
-type Tab = "manage" | "import";
+type Tab = "manage" | "import" | "dispatch";
 
 type Props = {
   user: AuthUser | null;
@@ -150,7 +151,15 @@ export default function AdminPanel({
             icon={<FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={1.6} />}
             label="Bulk import"
           />
+          <TabButton
+            active={tab === "dispatch"}
+            onClick={() => setTab("dispatch")}
+            icon={<Truck className="h-3.5 w-3.5" strokeWidth={1.6} />}
+            label="Dispatch & tracking"
+          />
         </div>
+
+        {tab === "dispatch" && <ShipmentManager />}
 
         {tab === "manage" && (
           <FragranceManager

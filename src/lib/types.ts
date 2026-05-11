@@ -89,6 +89,35 @@ export type GiftSubscription = {
   picks: GiftSubscriptionPick[];
 };
 
+export type ShipmentSourceType = "commit" | "sample_box" | "subscription_pick";
+
+export type ShipmentStatus =
+  | "pending"     // order placed, not yet packed
+  | "packed"      // packed in the studio, awaiting carrier pickup
+  | "shipped"     // handed to carrier, tracking number live
+  | "delivered"   // carrier confirms delivery
+  | "cancelled";  // off-path terminal state
+
+export type Shipment = {
+  id: string;
+  sourceType: ShipmentSourceType;
+  sourceId: string;
+  userId: string | null;
+  userEmail: string | null;
+  status: ShipmentStatus;
+  carrier: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  recipientName: string | null;
+  recipientAddress: string | null;
+  notes: string | null;
+  packedAt: string | null;
+  shippedAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GiftCard = {
   id: string;
   code: string;              // human-readable, e.g. "MO-7K3X-PRZ8"

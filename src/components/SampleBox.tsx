@@ -2,6 +2,7 @@ import { Check, Gift, Loader2, Lock, Package, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { SAMPLE_BOX_PRICE_CENTS, SAMPLE_BOX_SIZE, formatPrice } from "../lib/data";
+import { createShipment } from "../lib/shipments";
 import { isSupabaseEnabled, supabase } from "../lib/supabase";
 import type { Fragrance } from "../lib/types";
 
@@ -61,9 +62,11 @@ export default function SampleBox({
     try {
       // Spend gift credit first; only the remainder hits the buyer's card.
       const split = await onApplyGift(SAMPLE_BOX_PRICE_CENTS);
+      const orderId = crypto.randomUUID();
       if (isSupabaseEnabled && supabase) {
         try {
           await supabase.from("sample_box_orders").insert({
+            id: orderId,
             user_id: user.id.startsWith("demo-") ? null : user.id,
             user_email: user.email,
             fragrance_ids: Array.from(selected),
@@ -75,6 +78,18 @@ export default function SampleBox({
         } catch {
           /* best effort — demo flow continues */
         }
+      }
+      // Auto-create a shipment row so the member can track this box.
+      try {
+        await createShipment({
+          sourceType: "sample_box",
+          sourceId: orderId,
+          userId: user.id,
+          userEmail: user.email,
+          recipientName: user.name ?? null,
+        });
+      } catch {
+        /* tracking is best-effort */
       }
       // Simulate the Stripe authorize call.
       await new Promise((r) => setTimeout(r, 700));

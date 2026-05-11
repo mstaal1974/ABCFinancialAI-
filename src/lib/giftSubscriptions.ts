@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { createShipment } from "./shipments";
 import { isSupabaseEnabled, supabase } from "./supabase";
 import type {
   GiftSubscription,
@@ -341,9 +342,23 @@ export function useGiftSubscriptions(currentUserEmail: string | null) {
       }
 
       setWallet((prev) => prev.map((s) => (s.id === target.id ? updated : s)));
+
+      // Auto-create a shipment row so the recipient can track this pick.
+      try {
+        await createShipment({
+          sourceType: "subscription_pick",
+          sourceId: pick.id,
+          userId: null,
+          userEmail: currentUserEmail,
+          recipientName: target.recipientName,
+        });
+      } catch {
+        /* tracking is best-effort */
+      }
+
       return { ok: true, subscription: updated };
     },
-    [wallet],
+    [currentUserEmail, wallet],
   );
 
   return {

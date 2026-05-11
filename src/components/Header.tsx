@@ -1,4 +1,4 @@
-import { Crown, FlaskConical, Gift, LogOut, Menu, ShoppingBag, User as UserIcon, X } from "lucide-react";
+import { Crown, FlaskConical, Gift, LogOut, Menu, PackageSearch, ShoppingBag, User as UserIcon, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { formatPrice } from "../lib/data";
@@ -10,6 +10,7 @@ type Props = {
   giftBalanceCents: number;
   onOpenCommits: () => void;
   onOpenAuth: () => void;
+  onOpenOrders: () => void;
   onSignOut: () => void;
   onNavigate: (
     target: "vault" | "education" | "vip" | "samples" | "gift" | "subscription" | "home",
@@ -23,6 +24,7 @@ export default function Header({
   giftBalanceCents,
   onOpenCommits,
   onOpenAuth,
+  onOpenOrders,
   onSignOut,
   onNavigate,
 }: Props) {
@@ -147,6 +149,13 @@ export default function Header({
                       </div>
                     )}
                   </div>
+                  <button
+                    onClick={() => { setMenuOpen(false); onOpenOrders(); }}
+                    className="w-full flex items-center gap-2 px-4 py-3 sans text-[12px] uppercase tracking-[0.22em] text-cream/75 hover:bg-obsidian-soft hover:text-gold transition-colors border-b border-obsidian-line"
+                  >
+                    <PackageSearch className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    My Orders
+                  </button>
                   <button
                     onClick={() => { setMenuOpen(false); onSignOut(); }}
                     className="w-full flex items-center gap-2 px-4 py-3 sans text-[12px] uppercase tracking-[0.22em] text-cream/75 hover:bg-obsidian-soft hover:text-rust transition-colors"

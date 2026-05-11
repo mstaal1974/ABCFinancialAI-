@@ -12,6 +12,7 @@ import SampleBox from "./components/SampleBox";
 import GiftSection from "./components/GiftSection";
 import GiftRedeem from "./components/GiftRedeem";
 import GiftSubscriptionSection from "./components/GiftSubscriptionSection";
+import MyOrders from "./components/MyOrders";
 import SubscriptionRedeem from "./components/SubscriptionRedeem";
 // Admin panel pulls in the xlsx parser (~600 KB). Lazy-load so the
 // storefront bundle stays small.
@@ -27,6 +28,7 @@ type Route =
   | { kind: "product"; slug: string }
   | { kind: "gift"; code: string }
   | { kind: "subscription"; code: string }
+  | { kind: "orders" }
   | { kind: "admin" };
 
 function readRoute(): Route {
@@ -37,6 +39,7 @@ function readRoute(): Route {
   if (subscription) return { kind: "subscription", code: subscription[1].toUpperCase() };
   const gift = hash.match(/^\/?gift\/([A-Z0-9-]+)/i);
   if (gift) return { kind: "gift", code: gift[1].toUpperCase() };
+  if (/^\/?orders\b/.test(hash)) return { kind: "orders" };
   if (/^\/?admin\b/.test(hash)) return { kind: "admin" };
   return { kind: "home" };
 }
@@ -176,6 +179,9 @@ export default function App() {
         giftBalanceCents={gifts.balanceCents}
         onOpenCommits={() => setDrawerOpen(true)}
         onOpenAuth={() => requireAuth()}
+        onOpenOrders={() => {
+          window.location.hash = "/orders";
+        }}
         onSignOut={signOut}
         onNavigate={go}
       />
@@ -262,6 +268,14 @@ export default function App() {
         />
       )}
 
+      {route.kind === "orders" && (
+        <MyOrders
+          user={user}
+          onBack={() => backHome()}
+          onRequireAuth={requireAuth}
+        />
+      )}
+
       {route.kind === "admin" &&
         (() => {
           const allowed =
@@ -318,7 +332,12 @@ export default function App() {
         onClose={() => setDrawerOpen(false)}
         commits={commits}
         fragrances={fragrances}
+        user={user}
         onRelease={releaseCommit}
+        onOpenOrders={() => {
+          setDrawerOpen(false);
+          window.location.hash = "/orders";
+        }}
       />
 
       <AuthModal

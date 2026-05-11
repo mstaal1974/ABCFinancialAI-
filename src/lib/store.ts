@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type { Commit, Concentration, Fragrance, Gender, Note } from "./types";
 import { FRAGRANCES } from "./data";
+import { createShipment } from "./shipments";
 import { supabase, isSupabaseEnabled } from "./supabase";
 
 const COMMITS_KEY = "mo:commits:v1";
@@ -163,6 +164,17 @@ export function useFragrances() {
         } catch {
           /* offline — fine for MVP */
         }
+      }
+      // Auto-create a shipment row so the member can track this commit.
+      try {
+        await createShipment({
+          sourceType: "commit",
+          sourceId: newCommit.id,
+          userId: userMeta?.userId ?? null,
+          userEmail: userMeta?.userEmail ?? null,
+        });
+      } catch {
+        /* tracking is best-effort — never block a commit on it */
       }
       return newCommit;
     },
