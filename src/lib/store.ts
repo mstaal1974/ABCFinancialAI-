@@ -89,13 +89,17 @@ function saveCommits(commits: Commit[]) {
  * unreachable so the MVP demo always works.
  */
 export function useFragrances() {
-  const [fragrances, setFragrances] = useState<Fragrance[]>(FRAGRANCES);
+  // When Supabase is configured, the catalogue is sourced exclusively
+  // from the live `fragrances` table — the in-code seed is only used as
+  // a demo-mode fallback when there is no Supabase connection.
+  const [fragrances, setFragrances] = useState<Fragrance[]>(
+    isSupabaseEnabled ? [] : FRAGRANCES,
+  );
   const [commits, setCommits] = useState<Commit[]>(() => loadCommits());
   const [loading, setLoading] = useState(false);
 
-  // Pull the full catalogue from Supabase if configured. Supabase rows
-  // win over the seed when slugs match, and any extra rows (e.g. created
-  // via the admin) are appended.
+  // Pull the catalogue from Supabase if configured. Supabase rows are
+  // the source of truth; the seed only renders in demo mode.
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -103,12 +107,10 @@ export function useFragrances() {
       setLoading(true);
       try {
         const { data, error } = await supabase.from("fragrances").select("*");
-        if (error || !data || data.length === 0) return;
+        if (error || !data) return;
         if (cancelled) return;
         const live = (data as FragranceRow[]).map(rowToFragrance);
-        const bySlug = new Map(FRAGRANCES.map((f) => [f.slug, f]));
-        for (const f of live) bySlug.set(f.slug, f);
-        setFragrances(Array.from(bySlug.values()));
+        setFragrances(live);
       } finally {
         if (!cancelled) setLoading(false);
       }

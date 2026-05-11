@@ -21,7 +21,6 @@ import { useAuth } from "./lib/auth";
 import { useGifts } from "./lib/gifts";
 import { useGiftSubscriptions } from "./lib/giftSubscriptions";
 import { authorizePayment, notifyAdminBatchClosed } from "./lib/stripe";
-import { findFragrance } from "./lib/data";
 
 type Route =
   | { kind: "home" }
@@ -123,7 +122,7 @@ export default function App() {
   const productFragrance = useMemo(
     () =>
       route.kind === "product"
-        ? fragrances.find((f) => f.slug === route.slug) ?? findFragrance(route.slug)
+        ? fragrances.find((f) => f.slug === route.slug)
         : undefined,
     [route, fragrances],
   );
