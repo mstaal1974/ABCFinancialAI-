@@ -168,12 +168,22 @@ function fmtAUD(v, compact=true) {
 
 // ─── STATIC DATA FROM JSONs ────────────────────────────────────────────────────
 const UNIT_RATES = {
-  MSL20122:{QLD:338.75,NSW:null,NT:null,TAS:null,ACT:null,VIC:300,SA:null,EP:338.75},
-  MSL30122:{QLD:391.69,NSW:594.62,NT:358.4,TAS:384.69,ACT:319.23,VIC:581.54,SA:321.23,EP:391.69},
-  MSL40122:{QLD:775,NSW:782.67,NT:481.6,TAS:616.07,ACT:657.33,VIC:931,SA:396.27,EP:775},
-  MSL50122:{QLD:265.56,NSW:815.56,NT:733.6,TAS:450,ACT:492.78,VIC:556.11,SA:324.88,EP:265.56},
-  HLT37215:{QLD:450.71,NSW:552.14,NT:432.14,TAS:322.64,ACT:350.71,VIC:417.86,SA:278.64,EP:450.71},
-  FFS:{QLD:350,NSW:350,NT:350,TAS:350,ACT:350,VIC:350,SA:350,EP:350}
+  // ── Existing courses (updated prices from 2026 budget) ────────────────────
+  MSL20122:{QLD:339,   NSW:null,  NT:null,  TAS:null,  ACT:282.6, VIC:null,  SA:null,  EP:315},
+  MSL30122:{QLD:524.7, NSW:546.3, NT:321.3, TAS:401.4, ACT:360,   VIC:375,   SA:278.1, EP:0},
+  MSL40122:{QLD:768.6, NSW:792.9, NT:412.2, TAS:576,   ACT:677.7, VIC:400,   SA:327.6, EP:0},
+  MSL50122:{QLD:687.6, NSW:748.8, NT:394.2, TAS:405,   ACT:493.2, VIC:450,   SA:288,   EP:0},
+  HLT37215:{QLD:497.7, NSW:507.6, NT:405,   TAS:342,   ACT:367.2, VIC:325,   SA:275.4, EP:382.5},
+  FFS:     {QLD:350,   NSW:350,   NT:350,   TAS:350,   ACT:350,   VIC:350,   SA:350,   EP:0},
+  // ── New courses ───────────────────────────────────────────────────────────
+  BSB50420_FFS:{QLD:250,  NSW:250,  NT:250,  TAS:250,  ACT:250,  VIC:250,  SA:250,  EP:0},
+  MSL60122:    {QLD:894.6,NSW:null, NT:null, TAS:null, ACT:326.7,VIC:null, SA:0,    EP:0},
+  MSM30318:    {QLD:600.3,NSW:null, NT:null, TAS:374.4,ACT:404.1,VIC:null, SA:null, EP:0},
+  MSM30116:    {QLD:null, NSW:414.8,NT:null, TAS:null, ACT:315,  VIC:325,  SA:244.8,EP:0},
+  MSM40116:    {QLD:null, NSW:null, NT:null, TAS:null, ACT:null, VIC:400,  SA:null, EP:0},
+  BSB50420:    {QLD:null, NSW:null, NT:null, TAS:null, ACT:373.5,VIC:null, SA:null, EP:0},
+  VETIS_FFS:   {QLD:0,    NSW:null, NT:null, TAS:null, ACT:null, VIC:null, SA:null, EP:225},
+  VETIS_FFS_QLD:{QLD:0,   NSW:null, NT:null, TAS:null, ACT:null, VIC:null, SA:null, EP:90},
 };
 
 const BUDGET_INPUTS = [
@@ -316,64 +326,83 @@ const COST_INFLATION = { FY26: 1.0, FY27: 1.03, FY28: 1.03 * 1.03 }; // 3% YoY
 // FY26 base unit assumptions (keyed by short month name)
 const UNIT_ASSUMPTIONS_FY26 = {
   QLD: {
-    MSL20122: {price: UNIT_RATES.MSL20122.QLD, monthly: {Jul:1528,Aug:312,Sep:128,Oct:144,Nov:240,Dec:100,Jan:20,Feb:30,Mar:80,Apr:320,May:430,Jun:452}},
-    MSL30122: {price: UNIT_RATES.MSL30122.QLD, monthly: {Jul:20,Aug:20,Sep:20,Oct:20,Nov:22,Dec:15,Jan:15,Feb:22,Mar:24,Apr:24,May:26,Jun:29}},
-    MSL40122: {price: UNIT_RATES.MSL40122.QLD, monthly: {Jul:80,Aug:80,Sep:80,Oct:80,Nov:88,Dec:44,Jan:80,Feb:80,Mar:96,Apr:115,May:138,Jun:166}},
-    MSL50122: {price: UNIT_RATES.MSL50122.QLD, monthly: {Jul:15,Aug:20,Sep:20,Oct:20,Nov:22,Dec:11,Jan:10,Feb:11,Mar:12,Apr:13,May:14,Jun:15}},
-    HLT37215: {price: UNIT_RATES.HLT37215.QLD, monthly: {Jul:60,Aug:60,Sep:60,Oct:60,Nov:60,Dec:30,Jan:30,Feb:50,Mar:50,Apr:80,May:90,Jun:100}},
-    FFS:      {price: UNIT_RATES.FFS.QLD,       monthly: {Jul:15,Aug:15,Sep:15,Oct:15,Nov:17,Dec:17,Jan:17,Feb:18,Mar:20,Apr:22,May:24,Jun:26}},
+    MSL20122:    {price: UNIT_RATES.MSL20122.QLD,     monthly: {Jul:1528,Aug:312,Sep:128,Oct:144,Nov:240,Dec:100,Jan:20,Feb:30,Mar:80,Apr:320,May:430,Jun:452}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.QLD,     monthly: {Jul:20,Aug:20,Sep:20,Oct:20,Nov:22,Dec:15,Jan:15,Feb:22,Mar:24,Apr:24,May:26,Jun:29}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.QLD,     monthly: {Jul:80,Aug:80,Sep:80,Oct:80,Nov:88,Dec:44,Jan:80,Feb:80,Mar:96,Apr:115,May:138,Jun:166}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.QLD,     monthly: {Jul:15,Aug:20,Sep:20,Oct:20,Nov:22,Dec:11,Jan:10,Feb:11,Mar:12,Apr:13,May:14,Jun:15}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.QLD,     monthly: {Jul:60,Aug:60,Sep:60,Oct:60,Nov:60,Dec:30,Jan:30,Feb:50,Mar:50,Apr:80,May:90,Jun:100}},
+    FFS:         {price: UNIT_RATES.FFS.QLD,          monthly: {Jul:15,Aug:15,Sep:15,Oct:15,Nov:17,Dec:17,Jan:17,Feb:18,Mar:20,Apr:22,May:24,Jun:26}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.QLD, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL60122:    {price: UNIT_RATES.MSL60122.QLD,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30318:    {price: UNIT_RATES.MSM30318.QLD,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   NSW: {
-    MSL30122: {price: UNIT_RATES.MSL30122.NSW, monthly: {Jul:20,Aug:20,Sep:20,Oct:20,Nov:20,Dec:10,Jan:10,Feb:15,Mar:18,Apr:18,May:20,Jun:22}},
-    MSL40122: {price: UNIT_RATES.MSL40122.NSW, monthly: {Jul:80,Aug:80,Sep:80,Oct:80,Nov:80,Dec:50,Jan:50,Feb:75,Mar:94,Apr:117,May:129,Jun:141}},
-    MSL50122: {price: UNIT_RATES.MSL50122.NSW, monthly: {Jul:10,Aug:10,Sep:10,Oct:10,Nov:10,Dec:5,Jan:5,Feb:10,Mar:16,Apr:22,May:28,Jun:28}},
-    HLT37215: {price: UNIT_RATES.HLT37215.NSW, monthly: {Jul:40,Aug:40,Sep:40,Oct:50,Nov:50,Dec:40,Jan:40,Feb:50,Mar:95,Apr:80,May:80,Jun:80}},
-    FFS:      {price: UNIT_RATES.FFS.NSW,       monthly: {Jul:15,Aug:17,Sep:17,Oct:17,Nov:17,Dec:11,Jan:11,Feb:15,Mar:17,Apr:19,May:21,Jun:23}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.NSW,     monthly: {Jul:20,Aug:20,Sep:20,Oct:20,Nov:20,Dec:10,Jan:10,Feb:15,Mar:18,Apr:18,May:20,Jun:22}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.NSW,     monthly: {Jul:80,Aug:80,Sep:80,Oct:80,Nov:80,Dec:50,Jan:50,Feb:75,Mar:94,Apr:117,May:129,Jun:141}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.NSW,     monthly: {Jul:10,Aug:10,Sep:10,Oct:10,Nov:10,Dec:5,Jan:5,Feb:10,Mar:16,Apr:22,May:28,Jun:28}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.NSW,     monthly: {Jul:40,Aug:40,Sep:40,Oct:50,Nov:50,Dec:40,Jan:40,Feb:50,Mar:95,Apr:80,May:80,Jun:80}},
+    FFS:         {price: UNIT_RATES.FFS.NSW,          monthly: {Jul:15,Aug:17,Sep:17,Oct:17,Nov:17,Dec:11,Jan:11,Feb:15,Mar:17,Apr:19,May:21,Jun:23}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.NSW, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30116:    {price: UNIT_RATES.MSM30116.NSW,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   NT: {
-    MSL30122: {price: UNIT_RATES.MSL30122.NT, monthly: {Jul:4,Aug:0,Sep:4,Oct:0,Nov:0,Dec:2,Jan:0,Feb:4,Mar:0,Apr:8,May:0,Jun:12}},
-    MSL40122: {price: UNIT_RATES.MSL40122.NT, monthly: {Jul:18,Aug:0,Sep:22,Oct:0,Nov:0,Dec:12,Jan:2,Feb:12,Mar:0,Apr:22,May:0,Jun:22}},
-    MSL50122: {price: UNIT_RATES.MSL50122.NT, monthly: {Jul:4,Aug:0,Sep:8,Oct:0,Nov:0,Dec:3,Jan:2,Feb:7,Mar:0,Apr:7,May:0,Jun:8}},
-    HLT37215: {price: UNIT_RATES.HLT37215.NT, monthly: {Jul:0,Aug:0,Sep:4,Oct:0,Nov:4,Dec:0,Jan:4,Feb:0,Mar:4,Apr:0,May:12,Jun:0}},
-    FFS:      {price: UNIT_RATES.FFS.NT,       monthly: {Jul:2,Aug:0,Sep:2,Oct:0,Nov:0,Dec:1,Jan:0,Feb:1,Mar:0,Apr:1,May:0,Jun:1}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.NT,      monthly: {Jul:4,Aug:0,Sep:4,Oct:0,Nov:0,Dec:2,Jan:0,Feb:4,Mar:0,Apr:8,May:0,Jun:12}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.NT,      monthly: {Jul:18,Aug:0,Sep:22,Oct:0,Nov:0,Dec:12,Jan:2,Feb:12,Mar:0,Apr:22,May:0,Jun:22}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.NT,      monthly: {Jul:4,Aug:0,Sep:8,Oct:0,Nov:0,Dec:3,Jan:2,Feb:7,Mar:0,Apr:7,May:0,Jun:8}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.NT,      monthly: {Jul:0,Aug:0,Sep:4,Oct:0,Nov:4,Dec:0,Jan:4,Feb:0,Mar:4,Apr:0,May:12,Jun:0}},
+    FFS:         {price: UNIT_RATES.FFS.NT,           monthly: {Jul:2,Aug:0,Sep:2,Oct:0,Nov:0,Dec:1,Jan:0,Feb:1,Mar:0,Apr:1,May:0,Jun:1}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.NT,  monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   TAS: {
-    MSL30122: {price: UNIT_RATES.MSL30122.TAS, monthly: {Jul:0,Aug:4,Sep:0,Oct:4,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    MSL40122: {price: UNIT_RATES.MSL40122.TAS, monthly: {Jul:15,Aug:0,Sep:18,Oct:0,Nov:0,Dec:6,Jan:0,Feb:20,Mar:0,Apr:25,May:0,Jun:31}},
-    MSL50122: {price: UNIT_RATES.MSL50122.TAS, monthly: {Jul:3,Aug:0,Sep:3,Oct:0,Nov:0,Dec:4,Jan:0,Feb:2,Mar:0,Apr:12,May:0,Jun:12}},
-    HLT37215: {price: UNIT_RATES.HLT37215.TAS, monthly: {Jul:0,Aug:12,Sep:0,Oct:12,Nov:0,Dec:8,Jan:0,Feb:12,Mar:16,Apr:20,May:28,Jun:36}},
-    FFS:      {price: UNIT_RATES.FFS.TAS,       monthly: {Jul:4,Aug:0,Sep:4,Oct:0,Nov:0,Dec:2,Jan:0,Feb:4,Mar:0,Apr:2,May:0,Jun:2}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.TAS,     monthly: {Jul:0,Aug:4,Sep:0,Oct:4,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.TAS,     monthly: {Jul:15,Aug:0,Sep:18,Oct:0,Nov:0,Dec:6,Jan:0,Feb:20,Mar:0,Apr:25,May:0,Jun:31}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.TAS,     monthly: {Jul:3,Aug:0,Sep:3,Oct:0,Nov:0,Dec:4,Jan:0,Feb:2,Mar:0,Apr:12,May:0,Jun:12}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.TAS,     monthly: {Jul:0,Aug:12,Sep:0,Oct:12,Nov:0,Dec:8,Jan:0,Feb:12,Mar:16,Apr:20,May:28,Jun:36}},
+    FFS:         {price: UNIT_RATES.FFS.TAS,          monthly: {Jul:4,Aug:0,Sep:4,Oct:0,Nov:0,Dec:2,Jan:0,Feb:4,Mar:0,Apr:2,May:0,Jun:2}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.TAS, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30318:    {price: UNIT_RATES.MSM30318.TAS,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   ACT: {
-    MSL30122: {price: UNIT_RATES.MSL30122.ACT, monthly: {Jul:0,Aug:4,Sep:0,Oct:4,Nov:0,Dec:4,Jan:0,Feb:2,Mar:0,Apr:0,May:0,Jun:4}},
-    MSL40122: {price: UNIT_RATES.MSL40122.ACT, monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:6.6,Mar:0,Apr:6.6,May:0,Jun:6.6}},
-    MSL50122: {price: UNIT_RATES.MSL50122.ACT, monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:3.3,Mar:0,Apr:2,May:0,Jun:6}},
-    HLT37215: {price: UNIT_RATES.HLT37215.ACT, monthly: {Jul:8.8,Aug:10,Sep:10,Oct:17.6,Nov:30,Dec:30,Jan:15,Feb:35,Mar:48,Apr:70,May:90,Jun:120}},
-    FFS:      {price: UNIT_RATES.FFS.ACT,       monthly: {Jul:2,Aug:0,Sep:2,Oct:0,Nov:0,Dec:2,Jan:0,Feb:2,Mar:0,Apr:2,May:0,Jun:2}},
+    MSL20122:    {price: UNIT_RATES.MSL20122.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.ACT,     monthly: {Jul:0,Aug:4,Sep:0,Oct:4,Nov:0,Dec:4,Jan:0,Feb:2,Mar:0,Apr:0,May:0,Jun:4}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.ACT,     monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:6.6,Mar:0,Apr:6.6,May:0,Jun:6.6}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.ACT,     monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:3.3,Mar:0,Apr:2,May:0,Jun:6}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.ACT,     monthly: {Jul:8.8,Aug:10,Sep:10,Oct:17.6,Nov:30,Dec:30,Jan:15,Feb:35,Mar:48,Apr:70,May:90,Jun:120}},
+    FFS:         {price: UNIT_RATES.FFS.ACT,          monthly: {Jul:2,Aug:0,Sep:2,Oct:0,Nov:0,Dec:2,Jan:0,Feb:2,Mar:0,Apr:2,May:0,Jun:2}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.ACT, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL60122:    {price: UNIT_RATES.MSL60122.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30318:    {price: UNIT_RATES.MSM30318.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30116:    {price: UNIT_RATES.MSM30116.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    BSB50420:    {price: UNIT_RATES.BSB50420.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   VIC: {
-    MSL30122: {price: UNIT_RATES.MSL30122.VIC, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:5,Jan:0,Feb:5,Mar:5,Apr:10,May:15,Jun:25}},
-    MSL40122: {price: UNIT_RATES.MSL40122.VIC, monthly: {Jul:0,Aug:8,Sep:4,Oct:32,Nov:48,Dec:4,Jan:0,Feb:8,Mar:8,Apr:96,May:144,Jun:180}},
-    MSL50122: {price: UNIT_RATES.MSL50122.VIC, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:6,May:6,Jun:9}},
-    HLT37215: {price: UNIT_RATES.HLT37215.VIC, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:30,Apr:60,May:90,Jun:120}},
-    FFS:      {price: UNIT_RATES.FFS.VIC,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.VIC,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:5,Jan:0,Feb:5,Mar:5,Apr:10,May:15,Jun:25}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.VIC,     monthly: {Jul:0,Aug:8,Sep:4,Oct:32,Nov:48,Dec:4,Jan:0,Feb:8,Mar:8,Apr:96,May:144,Jun:180}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.VIC,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:6,May:6,Jun:9}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.VIC,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:30,Apr:60,May:90,Jun:120}},
+    FFS:         {price: UNIT_RATES.FFS.VIC,          monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.VIC, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30116:    {price: UNIT_RATES.MSM30116.VIC,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM40116:    {price: UNIT_RATES.MSM40116.VIC,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   SA: {
-    MSL30122: {price: UNIT_RATES.MSL30122.SA, monthly: {Jul:2,Aug:4,Sep:6,Oct:6,Nov:8,Dec:4,Jan:5,Feb:12,Mar:12,Apr:12,May:14,Jun:12}},
-    MSL40122: {price: UNIT_RATES.MSL40122.SA, monthly: {Jul:6,Aug:6,Sep:6,Oct:7,Nov:7,Dec:4,Jan:7,Feb:18,Mar:22,Apr:22,May:24,Jun:22}},
-    MSL50122: {price: UNIT_RATES.MSL50122.SA, monthly: {Jul:0,Aug:0,Sep:2,Oct:2,Nov:2,Dec:1,Jan:1,Feb:2,Mar:4,Apr:8,May:8,Jun:9}},
-    HLT37215: {price: UNIT_RATES.HLT37215.SA, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:5,May:15,Jun:30}},
-    FFS:      {price: UNIT_RATES.FFS.SA,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL30122:    {price: UNIT_RATES.MSL30122.SA,      monthly: {Jul:2,Aug:4,Sep:6,Oct:6,Nov:8,Dec:4,Jan:5,Feb:12,Mar:12,Apr:12,May:14,Jun:12}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.SA,      monthly: {Jul:6,Aug:6,Sep:6,Oct:7,Nov:7,Dec:4,Jan:7,Feb:18,Mar:22,Apr:22,May:24,Jun:22}},
+    MSL50122:    {price: UNIT_RATES.MSL50122.SA,      monthly: {Jul:0,Aug:0,Sep:2,Oct:2,Nov:2,Dec:1,Jan:1,Feb:2,Mar:4,Apr:8,May:8,Jun:9}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.SA,      monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:5,May:15,Jun:30}},
+    FFS:         {price: UNIT_RATES.FFS.SA,           monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    BSB50420_FFS:{price: UNIT_RATES.BSB50420_FFS.SA,  monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSM30116:    {price: UNIT_RATES.MSM30116.SA,      monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   },
   EP: {
-    // Education Pathways — national delivery stream (not state-based)
-    // Uses QLD-equivalent pricing; volumes reflect cross-state online/blended delivery
-    MSL20122: {price: UNIT_RATES.MSL20122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    MSL30122: {price: UNIT_RATES.MSL30122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    MSL40122: {price: UNIT_RATES.MSL40122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    MSL50122: {price: UNIT_RATES.MSL50122.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    HLT37215: {price: UNIT_RATES.HLT37215.EP, monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
-    FFS:      {price: UNIT_RATES.FFS.EP,       monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    // Education Pathways — national delivery stream
+    MSL20122:    {price: UNIT_RATES.MSL20122.EP,      monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL30122:    {price: 0,                           monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL40122:    {price: 0,                           monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    MSL50122:    {price: 0,                           monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    HLT37215:    {price: UNIT_RATES.HLT37215.EP,      monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    VETIS_FFS:   {price: UNIT_RATES.VETIS_FFS.EP,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
+    VETIS_FFS_QLD:{price: UNIT_RATES.VETIS_FFS_QLD.EP,monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
   }
 };
 
@@ -422,7 +451,7 @@ function _getSalesUnits(mo) {
 const TRAINER_TYPES = ["MSL", "HLT", "EP"];
 
 function _regionAvgUnitValue(region, trainerType) {
-  const EXCL = new Set(["MSL20122","FFS"]);
+  const EXCL = new Set(["MSL20122","FFS","BSB50420_FFS","VETIS_FFS","VETIS_FFS_QLD"]);
   const targetRegion = trainerType === "EP" ? "EP" : region;
   const courses = UNIT_ASSUMPTIONS_FY26[targetRegion];
   if(!courses) return 0;
@@ -1266,7 +1295,7 @@ function StaffPlanner({data, hiringEvents, setHiringEvents, onSaveHiring}) {
   // Average unit value per region — unweighted mean of "sellable" course prices.
   // MSL20122 and FFS are excluded as they are not sold through the sales team.
   // This gives QLD avg ≈ $471, matching the benchmark in the sales formula sheet.
-  const SALES_EXCLUDED_CODES = new Set(["MSL20122", "FFS"]);
+  const SALES_EXCLUDED_CODES = new Set(["MSL20122", "FFS", "BSB50420_FFS", "VETIS_FFS", "VETIS_FFS_QLD"]);
   const regionUnitValues = useMemo(() => {
     const m = new Map();
     data.regions.forEach(r => {
@@ -2653,7 +2682,7 @@ function CRMSalesReport({ data }) {
 
   // Get avg unit value for selected region from UNIT_ASSUMPTIONS_FY26
   const avgUnitValue = useMemo(() => {
-    const EXCL = new Set(["MSL20122","FFS"]);
+    const EXCL = new Set(["MSL20122","FFS","BSB50420_FFS","VETIS_FFS","VETIS_FFS_QLD"]);
     const courses = UNIT_ASSUMPTIONS_FY26[unitRegion];
     if (!courses) return 471;
     const prices = Object.entries(courses).filter(([c]) => !EXCL.has(c)).map(([,v]) => v.price);
