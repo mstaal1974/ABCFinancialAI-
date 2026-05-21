@@ -293,6 +293,32 @@ const ACTUALS_FY26 = {
   "Loan to Blocksure":     {Jul:8000,  Aug:8000,  Sep:8000,  Oct:8000,  Nov:8000,  Dec:8000,  Jan:8000,  Feb:8000},
 };
 
+// ─── Xero P&L actuals override helpers ────────────────────────────────────────
+// When the user uploads a Xero P&L XLSX, `xeroActuals` overrides the hardcoded
+// ACTUALS_FY26 / REVENUE_ACTUALS_FY26 / ACTUALS_FY26_MKS values. Shape:
+//   { costs: { [account]: { [mk]: number } },
+//     revenue: { [mk]: number },
+//     actualMks: ["Jul","Aug",...], cutoffMk: "Apr",
+//     fileName, uploadedAt, unmatched: [{ name, values }] }
+function getActualCost(account, mk, xeroActuals) {
+  const v = xeroActuals?.costs?.[account]?.[mk];
+  if (v !== undefined && v !== null) return v;
+  return ACTUALS_FY26[account]?.[mk] ?? null;
+}
+function getActualRevenue(mk, xeroActuals) {
+  const v = xeroActuals?.revenue?.[mk];
+  if (v !== undefined && v !== null) return v;
+  // REVENUE_ACTUALS_FY26 is defined later in the file but referenced at call time
+  return (typeof REVENUE_ACTUALS_FY26 !== "undefined" ? REVENUE_ACTUALS_FY26[mk] : null) ?? null;
+}
+function getActualMksSet(xeroActuals) {
+  if (xeroActuals?.actualMks?.length) return new Set(xeroActuals.actualMks);
+  return ACTUALS_FY26_MKS;
+}
+function getActualsCutoffMk(xeroActuals) {
+  return xeroActuals?.cutoffMk || ACTUALS_CUTOFF_MK;
+}
+
 
 // ─── 3-YEAR MONTH SCHEDULE (FY26 + FY27 + FY28) ──────────────────────────────
 // Each entry: { label: "Jul-25", mk: "Jul", year: 2025, fyLabel: "FY26" }
@@ -465,7 +491,8 @@ function _regionAvgUnitValue(region, trainerType) {
   return prices.length ? prices.reduce((s,p)=>s+p,0)/prices.length : 0;
 }
 
-function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}, peopleOverrides = {}, wageSettings = {}, cpiSettings = {}) {
+function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = {}, peopleOverrides = {}, wageSettings = {}, cpiSettings = {}, xeroActuals = null) {
+  const actualMksSet = getActualMksSet(xeroActuals);
   // Build unit data across all 36 months
   const units = [];
   Object.entries(UNIT_ASSUMPTIONS_FY26).forEach(([region, courses]) => {
@@ -531,28 +558,48 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
     const cpiPct = cpiSettings[fy.toLowerCase()] ?? 0;
     const cpiMultiplier = 1 + (cpiPct / 100);
     const cpiActive = cpiEffMoIdx < 0 || i >= cpiEffMoIdx;
-    let pmt = Math.round(CHART_OF_ACCOUNTS
-      .filter(ac => !CALC_ROWS.has(ac.account))
-      .reduce((s, ac) => {
+    // If we have Xero actuals for this FY26 month, use them as the source of
+    // truth — payments are the sum of actual cost lines, revenue is the actual
+    // revenue total. Otherwise fall back to the modeled baseline + filled-hire
+    // deltas as before.
+    const useActual = fy === "FY26" && actualMksSet.has(mk);
+    const actualRev = useActual ? getActualRevenue(mk, xeroActuals) : null;
+
+    let pmt;
+    if (useActual) {
+      pmt = Math.round(CHART_OF_ACCOUNTS.reduce((s, ac) => {
+        const a = getActualCost(ac.account, mk, xeroActuals);
+        if (a !== null) return s + a;
+        // Fall back to manual override or modeled baseline for any account
+        // missing from the upload (e.g. an account the user didn't import).
         const key = `${fy}|${ac.account}|${mk}`;
         if (coaAdjustments[key] !== undefined) return s + coaAdjustments[key];
-        const baseline = Math.round((ac.months[mk] || 0) * inflation);
-        return s + (cpiActive ? Math.round(baseline * cpiMultiplier) : baseline);
+        return s + Math.round((ac.months[mk] || 0) * inflation);
       }, 0));
-    // Add staffing: COA actuals as baseline + delta from peopleOverrides changes + wage increase multiplier
-    // wageSettings: { fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }
-    const wagePct = wageSettings[fy.toLowerCase()] ?? 0; // e.g. 3 = 3%
-    const wageMultiplier = 1 + (wagePct / 100);
-    // Only apply wage multiplier from effectiveMonth onward
-    const effectiveMoIdx = wageSettings.effectiveMonth ? ALL_MONTH_LABELS.indexOf(wageSettings.effectiveMonth) : -1;
-    const wageActive = effectiveMoIdx < 0 || i >= effectiveMoIdx;
-    const staffBase = CHART_OF_ACCOUNTS
-      .filter(ac => CALC_ROWS.has(ac.account))
-      .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
-    const staffWageMultiplied = wageActive ? Math.round(staffBase * wageMultiplier) : staffBase;
-    const staffDeltaWaged = wageActive ? Math.round(_staffDeltaPerMonth * inflation * wageMultiplier) : Math.round(_staffDeltaPerMonth * inflation);
-    pmt += staffWageMultiplied + staffDeltaWaged;
-    const baseRevenue = regions.reduce((s, r) => s + (r.monthlyData[i]?.revenue || 0), 0);
+    } else {
+      pmt = Math.round(CHART_OF_ACCOUNTS
+        .filter(ac => !CALC_ROWS.has(ac.account))
+        .reduce((s, ac) => {
+          const key = `${fy}|${ac.account}|${mk}`;
+          if (coaAdjustments[key] !== undefined) return s + coaAdjustments[key];
+          const baseline = Math.round((ac.months[mk] || 0) * inflation);
+          return s + (cpiActive ? Math.round(baseline * cpiMultiplier) : baseline);
+        }, 0));
+      // Add staffing: COA actuals as baseline + delta from peopleOverrides changes + wage increase multiplier
+      // wageSettings: { fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }
+      const wagePct = wageSettings[fy.toLowerCase()] ?? 0; // e.g. 3 = 3%
+      const wageMultiplier = 1 + (wagePct / 100);
+      // Only apply wage multiplier from effectiveMonth onward
+      const effectiveMoIdx = wageSettings.effectiveMonth ? ALL_MONTH_LABELS.indexOf(wageSettings.effectiveMonth) : -1;
+      const wageActive = effectiveMoIdx < 0 || i >= effectiveMoIdx;
+      const staffBase = CHART_OF_ACCOUNTS
+        .filter(ac => CALC_ROWS.has(ac.account))
+        .reduce((s, ac) => s + Math.round((ac.months[mk] || 0) * inflation), 0);
+      const staffWageMultiplied = wageActive ? Math.round(staffBase * wageMultiplier) : staffBase;
+      const staffDeltaWaged = wageActive ? Math.round(_staffDeltaPerMonth * inflation * wageMultiplier) : Math.round(_staffDeltaPerMonth * inflation);
+      pmt += staffWageMultiplied + staffDeltaWaged;
+    }
+    const modeledBaseRevenue = regions.reduce((s, r) => s + (r.monthlyData[i]?.revenue || 0), 0);
 
     // Filled events: confirmed hires add cost+revenue, confirmed departures remove both
     let filledStaffCostDelta = 0, filledRevDelta = 0;
@@ -571,9 +618,15 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
         }
       }
     });
+    // For actual months, filled-hire cost is already baked into the Xero wage
+    // actuals — don't double-count. For modeled months, layer it on.
+    if (!useActual) pmt += filledStaffCostDelta;
 
-    pmt += filledStaffCostDelta;
-    const revenue = baseRevenue + filledRevDelta;
+    // Revenue: prefer Xero actual; fall back to the modeled base + filled-hire
+    // contribution. (If Xero provided costs but not revenue for this month,
+    // we still want the modeled revenue projection.)
+    const baseRevenue = useActual && actualRev !== null ? actualRev : modeledBaseRevenue;
+    const revenue     = useActual && actualRev !== null ? actualRev : (modeledBaseRevenue + filledRevDelta);
     const net     = revenue - pmt;
     const opening = balance;
     balance = opening + net;
@@ -583,6 +636,7 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
       payments: pmt, netCashflow: net,
       openingBalance: opening, closingBalance: balance,
       filledStaffCostDelta, filledRevDelta,
+      isActual: useActual,
     };
   });
 
@@ -2035,7 +2089,7 @@ function calcStaffingRows(fy, filledHires = []) {
   return result;
 }
 
-function ExpensesView({ data, yearBasis = "financial", selectedYear = "All", setYearBasis, setSelectedYear, coaAdjustments, onUpdateCoa, onSaveCoa, saving, filledHires = [] }) {
+function ExpensesView({ data, yearBasis = "financial", selectedYear = "All", setYearBasis, setSelectedYear, coaAdjustments, onUpdateCoa, onSaveCoa, saving, filledHires = [], xeroActuals = null }) {
   const [activeCell, setActiveCell] = useState(null);
   const [cellValue, setCellValue] = useState("");
   const [viewMode, setViewMode] = useState("forecast"); // "forecast" | "actuals"
@@ -2084,17 +2138,20 @@ function ExpensesView({ data, yearBasis = "financial", selectedYear = "All", set
     return Math.round(base * infl);
   }, [coaAdjustments, staffAllFY]);
 
-  // Actual value — only available for FY26 months up to ACTUALS_CUTOFF_MK
+  const actualMksSet = useMemo(() => getActualMksSet(xeroActuals), [xeroActuals]);
+
+  // Actual value — only available for FY26 months covered by uploaded Xero P&L
+  // (or the built-in baseline when no upload is active).
   const getActual = useCallback((account, mk) => {
-    if (!ACTUALS_FY26_MKS.has(mk)) return null; // no actual yet
-    return ACTUALS_FY26[account]?.[mk] ?? null;
-  }, []);
+    if (!actualMksSet.has(mk)) return null;
+    return getActualCost(account, mk, xeroActuals);
+  }, [actualMksSet, xeroActuals]);
 
   // Convenience: forecast for active FY
   const getVal = useCallback((account, mk) => getValFY(account, mk, activeFY), [getValFY, activeFY]);
 
   // Is this month an actual (vs forecast) in the active FY?
-  const isActualMonth = useCallback((mk) => activeFY === "FY26" && ACTUALS_FY26_MKS.has(mk), [activeFY]);
+  const isActualMonth = useCallback((mk) => activeFY === "FY26" && actualMksSet.has(mk), [activeFY, actualMksSet]);
 
   const startEdit = (account, mk, current) => {
     setActiveCell({ account, mk });
@@ -2514,8 +2571,8 @@ function ExpensesView({ data, yearBasis = "financial", selectedYear = "All", set
                         </td>
                         {/* YTD variance column */}
                         {viewMode === "actuals" && activeFY === "FY26" && (() => {
-                          const actualMks = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"];
-                          const ytdActual   = actualMks.reduce((s,mk) => s + (ACTUALS_FY26[ac.account]?.[mk] ?? getValFY(ac.account, mk, "FY26")), 0);
+                          const actualMks = [...actualMksSet];
+                          const ytdActual   = actualMks.reduce((s,mk) => s + (getActualCost(ac.account, mk, xeroActuals) ?? getValFY(ac.account, mk, "FY26")), 0);
                           const ytdForecast = actualMks.reduce((s,mk) => s + getValFY(ac.account, mk, "FY26"), 0);
                           const ytdVar = ytdActual - ytdForecast;
                           const ytdPct = ytdForecast > 0 ? (ytdVar / ytdForecast * 100) : 0;
@@ -4444,7 +4501,7 @@ async function callGemini(prompt, systemPrompt = "", maxTokens = 4096) {
 }
 
 // ─── 1. ANOMALY DETECTION ENGINE ──────────────────────────────────────────────
-function useAnomalyDetection(coaAdjustments) {
+function useAnomalyDetection(coaAdjustments, xeroActuals = null) {
   const [anomalies, setAnomalies] = useState([]);
   const [anomalyStatus, setAnomalyStatus] = useState("idle"); // idle|scanning|done|error
   const [lastScanned, setLastScanned] = useState(null);
@@ -4466,12 +4523,12 @@ function useAnomalyDetection(coaAdjustments) {
 
     // Build anomaly data — compare each account's monthly actuals vs forecast
     const anomalyData = [];
-    const actualMks = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"];
+    const actualMks = [...getActualMksSet(xeroActuals)];
 
     CHART_OF_ACCOUNTS.forEach(ac => {
       const monthlyActuals = actualMks.map(mk => ({
         mk,
-        actual: ACTUALS_FY26[ac.account]?.[mk] ?? null,
+        actual: getActualCost(ac.account, mk, xeroActuals),
         forecast: ac.months[mk] || 0,
       })).filter(m => m.actual !== null);
 
@@ -4570,7 +4627,7 @@ Return ONLY a JSON array with this exact structure, no markdown, no backticks:
       setAnomalyStatus("done");
       setLastScanned(new Date());
     }
-  }, [coaAdjustments]);
+  }, [coaAdjustments, xeroActuals]);
 
   useEffect(() => { runScan(); }, []);
 
@@ -4799,7 +4856,7 @@ Two to three sentences about the overall 120-day cash outlook.`;
 }
 
 // ─── 3. MONTHLY NARRATIVE GENERATOR ───────────────────────────────────────────
-function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
+function MonthlyNarrativePanel({ data, coaAdjustments, currentUser, xeroActuals = null }) {
   const [narrative, setNarrative] = useState(null);
   const [loading, setLoading] = useState(false);
   const [reportType, setReportType] = useState("board"); // board|cfo|operations
@@ -4811,7 +4868,8 @@ function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
   // from MONTH_SCHEDULE so when more actuals are loaded the panel updates
   // without a code change.
   const fy26InOrder = useMemo(() => MONTH_SCHEDULE.filter(m => m.fy === "FY26"), []);
-  const closeMonths = useMemo(() => fy26InOrder.filter(m => ACTUALS_FY26_MKS.has(m.mk)), [fy26InOrder]);
+  const actualMksSet = useMemo(() => getActualMksSet(xeroActuals), [xeroActuals]);
+  const closeMonths = useMemo(() => fy26InOrder.filter(m => actualMksSet.has(m.mk)), [fy26InOrder, actualMksSet]);
   const lastClose   = closeMonths[closeMonths.length - 1] || fy26InOrder[0];
   const lastCloseMk    = lastClose?.mk || "Feb";
   const lastCloseLabel = lastClose?.label || "Feb-26";
@@ -4827,7 +4885,7 @@ function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
       // ── YTD totals from actuals where we have them, model otherwise ──────
       const ytdMks = closeMonths.map(m => m.mk);
       const ytdActual = ytdMks.reduce((s, mk) =>
-        s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (ACTUALS_FY26[ac.account]?.[mk] ?? ac.months[mk] ?? 0), 0), 0);
+        s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (getActualCost(ac.account, mk, xeroActuals) ?? ac.months[mk] ?? 0), 0), 0);
       const ytdForecast = ytdMks.reduce((s, mk) =>
         s + CHART_OF_ACCOUNTS.reduce((ss, ac) => ss + (ac.months[mk] || 0), 0), 0);
       const ytdRevenue = data.regions.reduce((s, r) =>
@@ -4837,7 +4895,7 @@ function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
 
       // YTD by section
       const ytdBySection = ["Direct Costs","Overheads"].map(sec => {
-        const a = ytdMks.reduce((s,mk) => s + CHART_OF_ACCOUNTS.filter(ac=>ac.section===sec).reduce((ss,ac)=>ss+(ACTUALS_FY26[ac.account]?.[mk]??ac.months[mk]??0),0), 0);
+        const a = ytdMks.reduce((s,mk) => s + CHART_OF_ACCOUNTS.filter(ac=>ac.section===sec).reduce((ss,ac)=>ss+(getActualCost(ac.account, mk, xeroActuals)??ac.months[mk]??0),0), 0);
         const f = ytdMks.reduce((s,mk) => s + CHART_OF_ACCOUNTS.filter(ac=>ac.section===sec).reduce((ss,ac)=>ss+(ac.months[mk]||0),0), 0);
         return { section: sec, actual: a, forecast: f, variance: a - f };
       });
@@ -4870,7 +4928,7 @@ function MonthlyNarrativePanel({ data, coaAdjustments, currentUser }) {
 
       // ── Top variances ────────────────────────────────────────────────────
       const topVariances = CHART_OF_ACCOUNTS.map(ac => {
-        const ytdA = ytdMks.reduce((s,mk) => s + (ACTUALS_FY26[ac.account]?.[mk] ?? ac.months[mk] ?? 0), 0);
+        const ytdA = ytdMks.reduce((s,mk) => s + (getActualCost(ac.account, mk, xeroActuals) ?? ac.months[mk] ?? 0), 0);
         const ytdF = ytdMks.reduce((s,mk) => s + (ac.months[mk] || 0), 0);
         return { account: ac.account, section: ac.section, variance: ytdA - ytdF, ytdA, ytdF };
       }).sort((a,b) => Math.abs(b.variance) - Math.abs(a.variance));
@@ -5334,7 +5392,7 @@ const GEMINI_URL = IS_PROD
   ? "/api/gemini"
   : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
 
-function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, currentUser }) {
+function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, currentUser, xeroActuals = null }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([
     { role: "assistant", text: "Hi! I'm your EduGrowth AI analyst. I have full access to your financial model, expenses, staffing and CRM data.\n\nTry asking me:\n• *\"What are our top 3 cost saving opportunities?\"*\n• *\"What happens if we hire 2 more salespeople in QLD?\"*\n• *\"Write a board summary of FY26 performance\"*" }
@@ -5387,9 +5445,9 @@ function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, curr
     }).sort((a, b) => b.total - a.total).slice(0, 10);
 
     // Actuals vs forecast for known months
-    const ytdActual = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s, mk) => {
+    const ytdActual = [...getActualMksSet(xeroActuals)].reduce((s, mk) => {
       return s + CHART_OF_ACCOUNTS.reduce((ss, ac) => {
-        return ss + (ACTUALS_FY26[ac.account]?.[mk] ?? ac.months[mk] ?? 0);
+        return ss + (getActualCost(ac.account, mk, xeroActuals) ?? ac.months[mk] ?? 0);
       }, 0);
     }, 0);
     const ytdForecast = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"].reduce((s, mk) => {
@@ -7466,20 +7524,231 @@ function CashFlowForecastView({ data }) {
 
 // ─── BUDGET VS ACTUALS P&L ────────────────────────────────────────────────────
 
-// Revenue actuals placeholder — in a real system these come from Xero
-// We use the model's operationalFinancials revenue for Jul-Feb as "actual revenue"
+// Revenue actuals placeholder — used as fallback before a Xero P&L upload.
 const REVENUE_ACTUALS_FY26 = {
   Jul: 682000, Aug: 712000, Sep: 698000, Oct: 741000,
   Nov: 756000, Dec: 523000, Jan: 489000, Feb: 634000,
 };
 
-function BudgetActualsPnLView({ data, coaAdjustments }) {
+// ─── Xero P&L XLSX parser ─────────────────────────────────────────────────────
+// Maps Xero account labels to CHART_OF_ACCOUNTS canonical names. Each entry is
+// a list of alias strings; matching is case-insensitive and ignores punctuation.
+const ACCOUNT_ALIASES = {
+  "Gross Wages (IncPAYG)": ["wages and salaries", "gross wages", "wages", "salaries", "wages & salaries", "wages incpayg"],
+  "Superannuation":        ["superannuation", "super", "super contributions", "superannuation expense"],
+  "Course Resources":      ["course resources", "training resources", "course materials"],
+  "Travel - National":     ["travel national", "travel domestic", "domestic travel", "travel - national"],
+  "Travel - International":["travel international", "international travel", "overseas travel", "travel - international"],
+  "Payroll Tax":           ["payroll tax"],
+  "Rent":                  ["rent", "rent expense", "premises rent"],
+  "IT Services":           ["it services", "it expenses", "it support", "computer expenses", "software", "computer software"],
+  "Entertainment":         ["entertainment", "entertainment expense"],
+  "Accounting & Audit":    ["accounting", "audit", "accounting and audit", "accounting & audit", "accounting fees"],
+  "Insurance":             ["insurance", "insurance expense"],
+  "Subscriptions":         ["subscriptions", "memberships", "subscriptions and memberships"],
+  "Legal":                 ["legal", "legal fees", "legal expenses"],
+  "Motor Vehicle":         ["motor vehicle", "motor vehicle expenses", "vehicle expenses"],
+  "Conferences & Seminars":["conferences", "seminars", "conferences and seminars", "conferences & seminars"],
+  "Advertising":           ["advertising", "advertising and marketing"],
+  "Contractors":           ["contractors", "consultants", "contractor fees"],
+  "Fringe Benefits Tax":   ["fringe benefits tax", "fbt"],
+  "Office Expenses":       ["office expenses", "office supplies", "general office"],
+  "Staff Training":        ["staff training", "training staff", "employee training"],
+  "Printing & Stationery": ["printing and stationery", "printing & stationery", "stationery", "printing"],
+  "Telephone & Internet":  ["telephone and internet", "telephone & internet", "telephone", "internet", "communications", "phone"],
+  "Bank Fees":             ["bank fees", "bank charges"],
+  "Cleaning":              ["cleaning", "cleaning expenses"],
+  "Uniforms":              ["uniforms", "uniform"],
+  "Licensing Fee":         ["licensing fee", "licensing fees", "license", "licence", "licences", "licenses"],
+  "Storage":               ["storage", "storage costs"],
+  "Room Hire":             ["room hire", "venue hire", "meeting room hire"],
+  "Client Gifts":          ["client gifts", "gifts", "customer gifts"],
+  "Interest Expense":      ["interest expense", "interest paid", "interest"],
+  "Refunds":               ["refunds", "customer refunds"],
+  "Staff Amenities":       ["staff amenities", "amenities"],
+  "Marketing":             ["marketing", "marketing expenses"],
+  "Loan to Blocksure":     ["loan to blocksure", "blocksure loan", "blocksure"],
+};
+const REVENUE_ROW_ALIASES = ["total income", "total revenue", "total trading income", "total operating income"];
+const INCOME_SECTION_HEADERS = ["income", "revenue", "trading income", "operating income"];
+
+function _normLabel(s) {
+  return String(s ?? "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+function _matchAccountName(label) {
+  const norm = _normLabel(label);
+  if (!norm) return null;
+  for (const ac of CHART_OF_ACCOUNTS) {
+    if (_normLabel(ac.account) === norm) return ac.account;
+  }
+  for (const [canonical, aliases] of Object.entries(ACCOUNT_ALIASES)) {
+    if (aliases.some(a => _normLabel(a) === norm)) return canonical;
+  }
+  // Loose substring fallback (longest alias first to avoid false hits)
+  const pairs = [];
+  for (const [canonical, aliases] of Object.entries(ACCOUNT_ALIASES)) {
+    for (const a of aliases) pairs.push([canonical, _normLabel(a)]);
+  }
+  pairs.sort((a, b) => b[1].length - a[1].length);
+  for (const [canonical, a] of pairs) {
+    if (a.length >= 4 && (norm.includes(a) || a.includes(norm))) return canonical;
+  }
+  return null;
+}
+const _MONTH_LOOKUP = {
+  jan:"Jan", january:"Jan", feb:"Feb", february:"Feb", mar:"Mar", march:"Mar",
+  apr:"Apr", april:"Apr", may:"May", jun:"Jun", june:"Jun",
+  jul:"Jul", july:"Jul", aug:"Aug", august:"Aug",
+  sep:"Sep", sept:"Sep", september:"Sep",
+  oct:"Oct", october:"Oct", nov:"Nov", november:"Nov", dec:"Dec", december:"Dec",
+};
+const _MK_ORDER_ALL = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function _detectMonthCell(cell) {
+  if (cell == null || cell === "") return null;
+  // Excel date-serial: number > 30000 (~year 1982) and < 60000 (~year 2064)
+  if (typeof cell === "number" && cell > 30000 && cell < 60000) {
+    const d = XLSX.SSF ? XLSX.SSF.parse_date_code(cell) : null;
+    if (d?.m && d?.y) return { mk: _MK_ORDER_ALL[d.m - 1], year: d.y };
+  }
+  const s = String(cell).trim().toLowerCase();
+  const m = s.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[\s,\-\/]*(\d{2,4})?/);
+  if (m) {
+    const mk = _MONTH_LOOKUP[m[1]];
+    let year = null;
+    if (m[2]) year = m[2].length === 2 ? 2000 + Number(m[2]) : Number(m[2]);
+    return { mk, year };
+  }
+  const dm = s.match(/(\d{4})[\-\/](\d{1,2})/) || s.match(/(\d{1,2})[\-\/](\d{4})/);
+  if (dm) {
+    const year = dm[1].length === 4 ? Number(dm[1]) : Number(dm[2]);
+    const monthIdx = Number(dm[1].length === 4 ? dm[2] : dm[1]);
+    if (monthIdx >= 1 && monthIdx <= 12) return { mk: _MK_ORDER_ALL[monthIdx - 1], year };
+  }
+  return null;
+}
+const _FY_ORDER = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May","Jun"];
+
+// Parse a Xero P&L XLSX workbook into { costs, revenue, actualMks, cutoffMk, unmatched }
+async function parseXeroPnLXlsx(arrayBuffer) {
+  if (typeof XLSX === "undefined") throw new Error("XLSX library not available — check your internet connection and reload.");
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
+  if (!rows.length) throw new Error("Workbook is empty.");
+
+  // Find the header row: scan the first 30 rows for one with ≥2 month-shaped cells.
+  let headerIdx = -1;
+  let monthCols = [];
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    const r = rows[i] || [];
+    const detected = r.map((c, idx) => {
+      const d = _detectMonthCell(c);
+      return d ? { idx, mk: d.mk, year: d.year } : null;
+    }).filter(Boolean);
+    if (detected.length >= 2) {
+      headerIdx = i;
+      monthCols = detected;
+      break;
+    }
+  }
+  if (headerIdx === -1) throw new Error("Could not find a month header row. Expected cells like 'Jul 2025', 'Jul-25', or 'July 2025'.");
+
+  const costs = {};
+  const revenue = {};
+  const unmatched = [];
+  let inIncome = false;
+  const incomeAccumulator = {};
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const labelRaw = r.find(c => typeof c === "string" && c.trim()) || (r[0] != null ? r[0] : "");
+    const label = String(labelRaw || "").trim();
+    if (!label) continue;
+    const lower = label.toLowerCase();
+
+    // Income section open
+    if (INCOME_SECTION_HEADERS.some(h => lower === h || lower.startsWith(h + ":"))) {
+      inIncome = true; continue;
+    }
+    // Total Income / Revenue → revenue actuals
+    if (REVENUE_ROW_ALIASES.some(a => lower === a || lower.startsWith(a))) {
+      monthCols.forEach(mc => {
+        const v = Number(r[mc.idx]);
+        if (!isNaN(v) && v !== 0) revenue[mc.mk] = v;
+      });
+      inIncome = false; continue;
+    }
+    // Section break
+    if (/^less\b|^expenses\b|^operating expenses|^cost of sales|^gross profit|^net profit|^profit\b|^surplus\b/i.test(label)) {
+      inIncome = false; continue;
+    }
+    // Sub-totals — skip
+    if (/^total\b/i.test(label)) { inIncome = false; continue; }
+
+    // Capture month values for this row
+    const rowVals = {};
+    let hasAny = false;
+    monthCols.forEach(mc => {
+      const cell = r[mc.idx];
+      if (cell == null || cell === "") return;
+      const v = Number(cell);
+      if (!isNaN(v)) {
+        rowVals[mc.mk] = v;
+        if (v !== 0) hasAny = true;
+      }
+    });
+    if (!hasAny && !inIncome) continue;
+
+    if (inIncome) {
+      monthCols.forEach(mc => {
+        incomeAccumulator[mc.mk] = (incomeAccumulator[mc.mk] || 0) + (rowVals[mc.mk] || 0);
+      });
+    } else {
+      const canonical = _matchAccountName(label);
+      if (canonical) {
+        if (!costs[canonical]) costs[canonical] = {};
+        monthCols.forEach(mc => {
+          if (rowVals[mc.mk] !== undefined) {
+            costs[canonical][mc.mk] = (costs[canonical][mc.mk] || 0) + rowVals[mc.mk];
+          }
+        });
+      } else if (hasAny) {
+        unmatched.push({ name: label, values: rowVals });
+      }
+    }
+  }
+
+  // Fallback: no explicit Total Income row → use the accumulator.
+  if (Object.keys(revenue).length === 0 && Object.keys(incomeAccumulator).length > 0) {
+    Object.assign(revenue, incomeAccumulator);
+  }
+
+  // Determine which months have any actual data
+  const seen = new Set();
+  Object.values(costs).forEach(obj => Object.keys(obj).forEach(mk => seen.add(mk)));
+  Object.keys(revenue).forEach(mk => seen.add(mk));
+  const actualMks = _FY_ORDER.filter(mk => seen.has(mk));
+  const cutoffMk = actualMks.length ? actualMks[actualMks.length - 1] : null;
+
+  if (Object.keys(costs).length === 0 && Object.keys(revenue).length === 0) {
+    throw new Error("No account data could be extracted. Confirm this is a Xero Profit & Loss export with months across columns.");
+  }
+  return { costs, revenue, actualMks, cutoffMk, unmatched, monthCols };
+}
+
+
+function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroActuals }) {
   const [activeFY,    setActiveFY]    = useState("FY26");
   const [viewMode,    setViewMode]    = useState("monthly"); // monthly | ytd | full_year
   const [expandedSections, setExpandedSections] = useState({ "Direct Costs": true, "Overheads": true });
+  const [uploading, setUploading]   = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [uploadInfo,  setUploadInfo]  = useState(null); // { matched, unmatched, monthsImported }
+  const [dragOver, setDragOver] = useState(false);
 
   const FY_LABELS = { FY26: "FY 2025–26", FY27: "FY 2026–27", FY28: "FY 2027–28" };
-  const ACTUAL_MKS = new Set(["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"]); // months with Xero actuals
+  // Months with Xero actuals — sourced from upload when present, otherwise default cutoff
+  const ACTUAL_MKS = useMemo(() => getActualMksSet(xeroActuals), [xeroActuals]);
 
   const fyMonths = useMemo(() => MONTH_SCHEDULE.filter(m => m.fy === activeFY), [activeFY]);
   const inflation = COST_INFLATION[activeFY] || 1;
@@ -7492,13 +7761,13 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
     return Math.round(base * inflation);
   }, [activeFY, coaAdjustments, inflation]);
 
-  // Get actual value for any CoA row + month (only available Jul–Feb FY26)
+  // Get actual value for any CoA row + month
   const getActual = useCallback((account, mk) => {
     if (activeFY !== "FY26" || !ACTUAL_MKS.has(mk)) return null;
-    return ACTUALS_FY26[account]?.[mk] ?? null;
-  }, [activeFY]);
+    return getActualCost(account, mk, xeroActuals);
+  }, [activeFY, ACTUAL_MKS, xeroActuals]);
 
-  // Revenue: budget from model, actuals from REVENUE_ACTUALS_FY26
+  // Revenue budget from model; actuals from Xero upload (falls back to placeholder)
   const getRevenueBudget = useCallback((mk) => {
     const op = data.operationalFinancials.find(o => o.month === `${mk}-${activeFY === "FY26" ? (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"25":"26") : activeFY === "FY27" ? (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"26":"27") : (["Jul","Aug","Sep","Oct","Nov","Dec"].includes(mk)?"27":"28")}`);
     return op?.revenue || 0;
@@ -7506,8 +7775,49 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
 
   const getRevenueActual = useCallback((mk) => {
     if (activeFY !== "FY26" || !ACTUAL_MKS.has(mk)) return null;
-    return REVENUE_ACTUALS_FY26[mk] ?? null;
-  }, [activeFY]);
+    return getActualRevenue(mk, xeroActuals);
+  }, [activeFY, ACTUAL_MKS, xeroActuals]);
+
+  // Handle Xero P&L upload
+  const processXeroFile = async (file) => {
+    if (!file || !onUpdateXeroActuals) return;
+    setUploading(true);
+    setUploadError(null);
+    setUploadInfo(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = await parseXeroPnLXlsx(buf);
+      const payload = {
+        fileName: file.name,
+        uploadedAt: new Date().toISOString(),
+        costs: parsed.costs,
+        revenue: parsed.revenue,
+        actualMks: parsed.actualMks,
+        cutoffMk: parsed.cutoffMk,
+        unmatched: parsed.unmatched,
+      };
+      onUpdateXeroActuals(payload);
+      setUploadInfo({
+        matched: Object.keys(parsed.costs).length,
+        unmatched: parsed.unmatched.length,
+        monthsImported: parsed.actualMks.length,
+        cutoffMk: parsed.cutoffMk,
+      });
+    } catch (e) {
+      console.error("Xero P&L parse error:", e);
+      setUploadError(e.message || "Unable to parse the workbook.");
+    }
+    setUploading(false);
+  };
+  const onXeroFileInput = (e) => { if (e.target.files[0]) processXeroFile(e.target.files[0]); };
+  const onXeroDrop = (e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files[0]) processXeroFile(e.dataTransfer.files[0]); };
+  const clearXeroUpload = () => {
+    if (onUpdateXeroActuals && confirm("Remove uploaded Xero actuals and revert to the built-in baseline?")) {
+      onUpdateXeroActuals(null);
+      setUploadInfo(null);
+      setUploadError(null);
+    }
+  };
 
   // P&L structure
   const pnlSections = useMemo(() => [
@@ -7622,7 +7932,10 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
             Budget vs Actuals — P&L
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Actuals from Xero (Jul–Feb FY26) · Budget from Unit Modeler + Chart of Accounts · Variances show + = favourable
+            {xeroActuals
+              ? `Actuals from Xero upload (${xeroActuals.fileName} · through ${getActualsCutoffMk(xeroActuals)} FY26)`
+              : `Actuals from Xero (Jul–${ACTUALS_CUTOFF_MK} FY26) — upload a Xero P&L below to refresh`
+            } · Budget from Unit Modeler + Chart of Accounts · Variances show + = favourable
           </p>
         </div>
         <div className="flex gap-2 flex-wrap">
@@ -7633,6 +7946,79 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* ── Xero P&L upload ── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <div className="flex items-start justify-between flex-wrap gap-3 mb-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+              <Upload size={15} className="text-rose-500"/> Xero P&L Upload
+            </h3>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Drop your Xero "Profit and Loss" export (.xlsx) — actuals replace the baseline for the months in the file.
+              Revenue performance and the cash flow chain update automatically; future months stay on the unit model.
+            </p>
+          </div>
+          {xeroActuals && (
+            <button onClick={clearXeroUpload}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600 transition-all">
+              Revert to baseline
+            </button>
+          )}
+        </div>
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onXeroDrop}
+          onClick={() => document.getElementById("xero-pnl-file-input")?.click()}
+          className={`border-2 border-dashed rounded-xl p-4 flex items-center gap-3 cursor-pointer transition-all ${dragOver ? "border-rose-400 bg-rose-50" : "border-slate-200 hover:border-rose-300 hover:bg-slate-50"}`}
+        >
+          <input id="xero-pnl-file-input" type="file" accept=".xlsx,.xls" className="hidden" onChange={onXeroFileInput}/>
+          {uploading
+            ? <Loader2 size={18} className="text-rose-500 animate-spin shrink-0"/>
+            : <Upload size={18} className="text-rose-400 shrink-0"/>
+          }
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-slate-700 truncate">
+              {uploading
+                ? "Parsing workbook…"
+                : xeroActuals
+                  ? `${xeroActuals.fileName} · ${xeroActuals.actualMks?.length || 0} months · uploaded ${new Date(xeroActuals.uploadedAt).toLocaleDateString("en-AU")}`
+                  : "Drop a Xero P&L (.xlsx) here or click to browse"
+              }
+            </p>
+            <p className="text-[10px] text-slate-400">Months across columns (e.g. Jul 2025, Aug 2025…) · accounts down rows · Total Income row used as revenue actual</p>
+          </div>
+          {!uploading && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0 ${xeroActuals ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+              {xeroActuals ? "Active" : "No upload"}
+            </span>
+          )}
+        </div>
+        {uploadError && (
+          <p className="mt-2 text-xs text-rose-700 bg-rose-50 border border-rose-200 px-3 py-2 rounded-lg">{uploadError}</p>
+        )}
+        {uploadInfo && !uploadError && (
+          <p className="mt-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-lg">
+            ✓ Imported {uploadInfo.matched} account{uploadInfo.matched === 1 ? "" : "s"} across {uploadInfo.monthsImported} month{uploadInfo.monthsImported === 1 ? "" : "s"}
+            {uploadInfo.cutoffMk ? ` (through ${uploadInfo.cutoffMk})` : ""}.
+            {uploadInfo.unmatched > 0 ? ` ${uploadInfo.unmatched} row${uploadInfo.unmatched === 1 ? "" : "s"} could not be matched — see below.` : ""}
+          </p>
+        )}
+        {xeroActuals?.unmatched?.length > 0 && (
+          <details className="mt-2">
+            <summary className="text-xs font-semibold text-amber-700 cursor-pointer bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">
+              ⚠ {xeroActuals.unmatched.length} unmatched Xero account{xeroActuals.unmatched.length === 1 ? "" : "s"} (skipped — add aliases or rename in Xero)
+            </summary>
+            <ul className="mt-2 text-[11px] text-slate-600 space-y-0.5 pl-3">
+              {xeroActuals.unmatched.slice(0, 30).map((u, idx) => (
+                <li key={idx} className="font-mono">· {u.name}</li>
+              ))}
+              {xeroActuals.unmatched.length > 30 && <li className="text-slate-400">… and {xeroActuals.unmatched.length - 30} more</li>}
+            </ul>
+          </details>
+        )}
       </div>
 
       {/* ── 3-Year Summary Cards ── */}
@@ -7676,7 +8062,7 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
       {/* ── YTD Summary (FY26 only) ── */}
       {activeFY === "FY26" && (
         <div className="bg-white rounded-xl border border-slate-100 p-5">
-          <h3 className="text-sm font-bold text-slate-700 mb-3">YTD Summary — Jul–Feb 2026 (8 Months Actual)</h3>
+          <h3 className="text-sm font-bold text-slate-700 mb-3">YTD Summary — Jul–{getActualsCutoffMk(xeroActuals)} 2026 ({ACTUAL_MKS.size} Months Actual)</h3>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {[
               { label: "Revenue", ...calcYTD(getRevenueBudget, getRevenueActual), reverse: false },
@@ -7846,7 +8232,7 @@ function BudgetActualsPnLView({ data, coaAdjustments }) {
           </table>
         </div>
         <div className="px-4 py-2 bg-slate-50 border-t text-[10px] text-slate-400 flex gap-4">
-          <span><strong>B</strong> = Budget (model + CoA) · <strong>A</strong> = Xero Actuals (Jul–Feb) · <strong>Var</strong> = Actual minus Budget</span>
+          <span><strong>B</strong> = Budget (model + CoA) · <strong>A</strong> = Xero Actuals (Jul–{getActualsCutoffMk(xeroActuals)}) · <strong>Var</strong> = Actual minus Budget</span>
           <span className="text-emerald-600">Green = favourable variance</span>
           <span className="text-rose-500">Red = unfavourable variance</span>
           <span>Click section header to expand/collapse</span>
@@ -7998,6 +8384,7 @@ export default function App() {
   const [coaAdjustments, setCoaAdjustments] = useState({});
   const [peopleOverrides, setPeopleOverrides] = useState({});
   const [hiringEvents, setHiringEvents] = useState([]);
+  const [xeroActuals, setXeroActuals] = useState(null); // uploaded Xero P&L overrides
   const NULL_WAGE = { fy26: 0, fy27: 0, fy28: 0, effectiveMonth: "Jul-26" };
   const [appliedWage, setAppliedWage] = useState(NULL_WAGE);   // committed — flows into data/cashflow
   const [draftWage,   setDraftWage]   = useState({ fy26: 0, fy27: 3, fy28: 5, effectiveMonth: "Jul-26" }); // modelling only
@@ -8107,6 +8494,11 @@ export default function App() {
           const savedCpi = localStorage.getItem("applied_cpi_settings");
           if (savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
         }
+        // Load uploaded Xero P&L actuals from localStorage (no Supabase table yet)
+        const savedXero = localStorage.getItem("xero_actuals");
+        if (savedXero) {
+          try { setXeroActuals(JSON.parse(savedXero)); console.log("✓ Loaded Xero P&L actuals from localStorage"); } catch {}
+        }
         setSupaStatus("connected");
       } catch(e) {
         console.warn("Supabase load failed, using localStorage fallback:", e);
@@ -8124,6 +8516,8 @@ export default function App() {
           if(savedWage) { try { const w = JSON.parse(savedWage); setAppliedWage(w); setDraftWage(w); } catch {} }
           const savedCpi = localStorage.getItem("applied_cpi_settings");
           if(savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
+          const savedXero = localStorage.getItem("xero_actuals");
+          if(savedXero) { try { setXeroActuals(JSON.parse(savedXero)); } catch {} }
         } catch {}
       }
       setLoading(false);
@@ -8133,7 +8527,7 @@ export default function App() {
 
   // Filled hires are treated as committed — they feed into the true cost/revenue position
   const filledHires = useMemo(() => hiringEvents.filter(ev => ev.filled), [hiringEvents]);
-  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi]);
+  const data = useMemo(() => buildBaselineData(unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi, xeroActuals), [unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi, xeroActuals]);
 
   const availableYears = useMemo(() => {
     const s = new Set();
@@ -8164,6 +8558,7 @@ export default function App() {
     setUnitAdjustments({});
     setHiringEvents([]);
     setCoaAdjustments({});
+    setXeroActuals(null);
     setLoading(true);
   };
 
@@ -8177,6 +8572,17 @@ export default function App() {
       sbAudit(currentUser, "UPDATE", "UNIT", `${region} · ${code} · ${month}`, oldVal ?? null, newUnits);
       return next;
     });
+  };
+
+  const handleUpdateXeroActuals = (payload) => {
+    setXeroActuals(payload);
+    if (payload === null) {
+      localStorage.removeItem("xero_actuals");
+      sbAudit(currentUser, "CLEAR", "XERO_PNL", "Reverted to baseline actuals");
+    } else {
+      localStorage.setItem("xero_actuals", JSON.stringify(payload));
+      sbAudit(currentUser, "UPLOAD", "XERO_PNL", `${payload.fileName} · ${payload.actualMks?.length || 0} months · through ${payload.cutoffMk || "?"}`);
+    }
   };
 
   const handleUpdateCoa = (fy, account, mk, value) => {
@@ -8395,7 +8801,7 @@ export default function App() {
   };
 
   // ── Anomaly detection — must be called unconditionally (Rules of Hooks) ──────
-  const { anomalies, anomalyStatus, lastScanned, runScan } = useAnomalyDetection(coaAdjustments);
+  const { anomalies, anomalyStatus, lastScanned, runScan } = useAnomalyDetection(coaAdjustments, xeroActuals);
 
   // ── Auth gate rendering ─────────────────────────────────────────────────────
   if (authState === "checking") return (
@@ -8436,8 +8842,8 @@ export default function App() {
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
       {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><CashFlowForecastView data={data}/></div>}
-      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments}/>}
-      {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires}/>}
+      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals}/>}
+      {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires} xeroActuals={xeroActuals}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
@@ -8449,7 +8855,7 @@ export default function App() {
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
           <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan} currentUser={currentUser}/>
-          <MonthlyNarrativePanel data={data} coaAdjustments={coaAdjustments} currentUser={currentUser}/>
+          <MonthlyNarrativePanel data={data} coaAdjustments={coaAdjustments} currentUser={currentUser} xeroActuals={xeroActuals}/>
           <CashflowForecastPanel data={data} coaAdjustments={coaAdjustments}/>
         </div>
       )}
@@ -8459,6 +8865,7 @@ export default function App() {
         hiringEvents={hiringEvents}
         filledHires={filledHires}
         currentUser={currentUser}
+        xeroActuals={xeroActuals}
       />
     </Layout>
   );
