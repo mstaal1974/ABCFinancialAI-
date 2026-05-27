@@ -7445,6 +7445,639 @@ function DecemberCashRequirementPanel({ data }) {
 }
 
 
+// ─── AI SCENARIO BUILDER ─────────────────────────────────────────────────────
+// Two modes that share a single revenue target:
+//   1. Enrolment Mix Calculator — converts the target into unit/student
+//      requirements across courses × locations using historical FY26
+//      acquisition mix as the basis for several deterministic distribution
+//      presets, plus an AI-generated "smart mix" option.
+//   2. Sales & Marketing Strategy — Gemini-authored plan describing how to
+//      win the enrolments implied by the selected mix.
+function AIScenarioBuilder({ data }) {
+  const [mode, setMode] = useState("mix"); // mix | strategy
+
+  // Derive the largest Dec cash shortfall across available years so the
+  // target revenue defaults to what the business actually needs to close.
+  const defaultTarget = useMemo(() => {
+    const opFin = data.operationalFinancials || [];
+    const byMonth = {};
+    opFin.forEach(op => { byMonth[op.month] = op; });
+    const yy = y => String(y).slice(-2);
+    let worstGap = 0;
+    for (let y = 2024; y <= 2030; y++) {
+      const dec = byMonth[`Dec-${yy(y)}`];
+      const jan = byMonth[`Jan-${yy(y+1)}`];
+      const may = byMonth[`May-${yy(y+1)}`];
+      if (!dec || !jan || !may) continue;
+      let running = 0, minCum = 0;
+      ["Jan","Feb","Mar","Apr","May"].forEach(mk => {
+        running += (byMonth[`${mk}-${yy(y+1)}`]?.netCashflow || 0);
+        if (running < minCum) minCum = running;
+      });
+      const required = Math.max(200000, 200000 - minCum);
+      const gap = dec.closingBalance - required;
+      if (gap < worstGap) worstGap = gap;
+    }
+    return Math.max(250000, Math.round(-worstGap / 1000) * 1000) || 500000;
+  }, [data]);
+
+  const [target, setTarget] = useState(defaultTarget);
+  const [targetInput, setTargetInput] = useState(String(defaultTarget));
+  useEffect(() => {
+    setTarget(defaultTarget);
+    setTargetInput(String(defaultTarget));
+  }, [defaultTarget]);
+
+  // Build FY26 acquisition mix from data.units: region × course with FY26
+  // units, price, revenue and share-of-revenue. FY26 is used as the
+  // most-actuals-heavy reference year.
+  const mix = useMemo(() => {
+    const rows = [];
+    (data.units || []).forEach(u => {
+      const fy26Units = u.monthlyData
+        .filter(m => m.fy === "FY26")
+        .reduce((s, m) => s + (m.units || 0), 0);
+      if (fy26Units <= 0 || !u.price) return;
+      const fy26Rev = fy26Units * u.price;
+      rows.push({
+        key: `${u.region}|${u.code}`,
+        region: u.region, code: u.code, price: u.price,
+        units: fy26Units, revenue: fy26Rev,
+      });
+    });
+    const totalUnits = rows.reduce((s, r) => s + r.units, 0);
+    const totalRev   = rows.reduce((s, r) => s + r.revenue, 0);
+    rows.forEach(r => {
+      r.shareRev   = totalRev ? r.revenue / totalRev : 0;
+      r.shareUnits = totalUnits ? r.units / totalUnits : 0;
+    });
+    return { rows, totalUnits, totalRev };
+  }, [data]);
+
+  const [preset, setPreset] = useState("prorata"); // prorata | premium | volume | smart
+  const [smartMix, setSmartMix] = useState(null);
+  const [smartLoading, setSmartLoading] = useState(false);
+  const [smartError, setSmartError] = useState(null);
+
+  const allocations = useMemo(() => {
+    if (!mix.rows.length || target <= 0) return [];
+    let weighted = [];
+    if (preset === "prorata") {
+      weighted = mix.rows.map(r => ({ ...r, weight: r.shareRev }));
+    } else if (preset === "premium") {
+      const sorted = [...mix.rows].sort((a,b) => b.price - a.price);
+      const keepN = Math.max(6, Math.ceil(sorted.length * 0.5));
+      const keep = new Set(sorted.slice(0, keepN).map(r => r.key));
+      const subset = mix.rows.filter(r => keep.has(r.key));
+      const sub = subset.reduce((s, r) => s + r.revenue, 0) || 1;
+      weighted = mix.rows.map(r => ({ ...r, weight: keep.has(r.key) ? r.revenue / sub : 0 }));
+    } else if (preset === "volume") {
+      const byRegion = {};
+      mix.rows.forEach(r => { byRegion[r.region] = (byRegion[r.region] || 0) + r.units; });
+      const topRegions = new Set(
+        Object.entries(byRegion).sort((a,b) => b[1] - a[1]).slice(0, 3).map(([reg]) => reg)
+      );
+      const subset = mix.rows.filter(r => topRegions.has(r.region));
+      const sub = subset.reduce((s, r) => s + r.revenue, 0) || 1;
+      weighted = mix.rows.map(r => ({ ...r, weight: topRegions.has(r.region) ? r.revenue / sub : 0 }));
+    } else if (preset === "smart" && smartMix) {
+      const byKey = {};
+      smartMix.allocations.forEach(a => { byKey[`${a.region}|${a.code}`] = a.units; });
+      return mix.rows
+        .filter(r => byKey[r.key] > 0)
+        .map(r => ({ ...r, allocUnits: byKey[r.key], allocRev: byKey[r.key] * r.price }))
+        .sort((a, b) => b.allocRev - a.allocRev);
+    } else {
+      weighted = mix.rows.map(r => ({ ...r, weight: r.shareRev }));
+    }
+    const weightSum = weighted.reduce((s, r) => s + r.weight, 0) || 1;
+    return weighted
+      .map(r => {
+        const dollars = target * (r.weight / weightSum);
+        const units = r.price > 0 ? dollars / r.price : 0;
+        return { ...r, allocUnits: units, allocRev: units * r.price };
+      })
+      .filter(r => r.allocUnits >= 0.5)
+      .sort((a, b) => b.allocRev - a.allocRev);
+  }, [mix, target, preset, smartMix]);
+
+  const allocSummary = useMemo(() => {
+    const totalUnits = allocations.reduce((s, r) => s + r.allocUnits, 0);
+    const totalRev   = allocations.reduce((s, r) => s + r.allocRev, 0);
+    const byRegion = {};
+    allocations.forEach(r => {
+      if (!byRegion[r.region]) byRegion[r.region] = { region: r.region, units: 0, revenue: 0 };
+      byRegion[r.region].units   += r.allocUnits;
+      byRegion[r.region].revenue += r.allocRev;
+    });
+    const byCourse = {};
+    allocations.forEach(r => {
+      if (!byCourse[r.code]) byCourse[r.code] = { code: r.code, units: 0, revenue: 0 };
+      byCourse[r.code].units   += r.allocUnits;
+      byCourse[r.code].revenue += r.allocRev;
+    });
+    return {
+      totalUnits, totalRev,
+      regions: Object.values(byRegion).sort((a,b) => b.revenue - a.revenue),
+      courses: Object.values(byCourse).sort((a,b) => b.revenue - a.revenue),
+      // Rough enrolment estimate at ~4 units/student (mix of FFS singles
+      // and multi-unit qualifications).
+      estStudents: Math.round(totalUnits / 4),
+    };
+  }, [allocations]);
+
+  const applyTarget = () => {
+    const v = parseFloat(targetInput.replace(/[^0-9.-]/g, ""));
+    if (!isNaN(v) && v > 0) setTarget(Math.round(v));
+  };
+
+  const generateSmartMix = async () => {
+    setSmartLoading(true); setSmartError(null); setSmartMix(null);
+    try {
+      const topRows = [...mix.rows]
+        .sort((a,b) => b.units - a.units)
+        .slice(0, 30)
+        .map(r => `${r.region}|${r.code}|price=${Math.round(r.price)}|fy26Units=${Math.round(r.units)}`)
+        .join("\n");
+
+      const prompt = `You are a growth strategist for ABC Training, an Australian RTO.
+We need to generate an additional $${target.toLocaleString()} of revenue beyond
+the current forecast, by acquiring more student enrolments distributed across
+courses and locations.
+
+FY26 historical acquisition mix (region | course | unit price | FY26 units):
+${topRows}
+
+Design a "smart mix" allocation that:
+- Totals approximately $${target.toLocaleString()} in additional revenue
+- Concentrates on a focused set of 6-10 region|course combinations
+- Favours combinations with strong FY26 unit acquisition history (proves market demand)
+- Caps any single combination at a 25% uplift on FY26 baseline (realism)
+
+Reply in EXACTLY this format. Use pipe | as delimiter. No other text.
+
+ALLOCATIONS
+QLD|MSL40122|180
+NSW|HLT37215|120
+
+RATIONALE
+One short paragraph (2-3 sentences) explaining why this mix.`;
+
+      const raw = await callGemini(prompt, "", 1024);
+      const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+      let section = "";
+      const allocs = [];
+      let rationale = "";
+      for (const line of lines) {
+        if (line === "ALLOCATIONS") { section = "alloc"; continue; }
+        if (line === "RATIONALE")   { section = "rat";   continue; }
+        if (section === "alloc" && line.includes("|")) {
+          const p = line.split("|");
+          if (p.length >= 3) {
+            const units = parseFloat(p[2]);
+            if (!isNaN(units) && units > 0) {
+              allocs.push({ region: p[0].trim(), code: p[1].trim(), units: Math.round(units) });
+            }
+          }
+        } else if (section === "rat") {
+          rationale += (rationale ? " " : "") + line;
+        }
+      }
+      if (allocs.length === 0) throw new Error("AI did not return any allocations");
+      setSmartMix({ label: "AI Smart Mix", allocations: allocs, rationale });
+      setPreset("smart");
+    } catch (e) {
+      console.error("Smart mix error:", e);
+      setSmartError(e.message || "Failed to generate smart mix");
+    }
+    setSmartLoading(false);
+  };
+
+  const ALL_CHANNELS = ["Digital Ads", "SEO/Content", "B2B / Employers", "Industry Partnerships", "Referrals", "Trade Shows", "Outbound Sales", "Social/Influencer"];
+  const [horizon, setHorizon] = useState("6 months");
+  const [channels, setChannels] = useState(["Digital Ads", "B2B / Employers", "Referrals"]);
+  const [strategy, setStrategy] = useState(null);
+  const [stratLoading, setStratLoading] = useState(false);
+  const [stratError, setStratError] = useState(null);
+
+  const toggleChannel = (c) => {
+    setChannels(prev => prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c]);
+  };
+
+  const generateStrategy = async () => {
+    setStratLoading(true); setStratError(null); setStrategy(null);
+    try {
+      const top = allocSummary.regions.slice(0, 4).map(r => `${r.region}: ${Math.round(r.units)} units / $${Math.round(r.revenue).toLocaleString()}`).join(", ");
+      const courses = allocSummary.courses.slice(0, 5).map(c => `${c.code}: ${Math.round(c.units)} units`).join(", ");
+
+      const prompt = `You are the Head of Sales & Marketing at ABC Training, an Australian RTO.
+We need to generate $${target.toLocaleString()} in additional enrolment revenue
+within the next ${horizon}.
+
+Target enrolment mix (from "${preset}" scenario):
+- Total additional units: ${Math.round(allocSummary.totalUnits)} (~${allocSummary.estStudents} students)
+- Top regions: ${top || "n/a"}
+- Top courses: ${courses || "n/a"}
+
+Preferred channels: ${channels.join(", ") || "any"}
+
+Produce a focused sales & marketing strategy. Reply in EXACTLY this format
+using pipe | as delimiter. No other text, no markdown.
+
+OBJECTIVE
+One sentence stating the revenue and enrolment target in plain language.
+
+PILLARS
+Pillar Name|One-line description of the strategic thrust
+(3 to 5 pillars)
+
+CHANNEL_PLAYS
+Channel|Specific action|KPI / weekly target|Lead time
+(4 to 8 rows, drawn from the preferred channels above)
+
+REGION_PLAYS
+Region|Tactical priority for that market|Owner role
+(one row per top region listed above)
+
+QUICK_WINS
+Action that can produce revenue in the first 30 days
+(3 to 5 rows)
+
+RISKS
+Risk or blocker|Mitigation
+(2 to 3 rows)
+
+OUTLOOK
+Two to three sentences on the likelihood of hitting the target with this plan.`;
+
+      const raw = await callGemini(prompt, "", 2048);
+      const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+      let section = "";
+      const result = { objective: "", pillars: [], channelPlays: [], regionPlays: [], quickWins: [], risks: [], outlook: "" };
+      for (const line of lines) {
+        const upper = line.toUpperCase();
+        if (upper === "OBJECTIVE")      { section = "obj"; continue; }
+        if (upper === "PILLARS")        { section = "pil"; continue; }
+        if (upper === "CHANNEL_PLAYS")  { section = "ch";  continue; }
+        if (upper === "REGION_PLAYS")   { section = "reg"; continue; }
+        if (upper === "QUICK_WINS")     { section = "qw";  continue; }
+        if (upper === "RISKS")          { section = "rsk"; continue; }
+        if (upper === "OUTLOOK")        { section = "out"; continue; }
+
+        if (section === "obj") result.objective += (result.objective ? " " : "") + line;
+        else if (section === "pil" && line.includes("|")) {
+          const [name, desc] = line.split("|");
+          result.pillars.push({ name: name.trim(), desc: (desc||"").trim() });
+        } else if (section === "ch" && line.includes("|")) {
+          const p = line.split("|");
+          if (p.length >= 3) result.channelPlays.push({ channel: p[0].trim(), action: p[1].trim(), kpi: p[2].trim(), leadTime: (p[3]||"").trim() });
+        } else if (section === "reg" && line.includes("|")) {
+          const p = line.split("|");
+          if (p.length >= 2) result.regionPlays.push({ region: p[0].trim(), play: p[1].trim(), owner: (p[2]||"").trim() });
+        } else if (section === "qw") result.quickWins.push(line);
+        else if (section === "rsk" && line.includes("|")) {
+          const [risk, mit] = line.split("|");
+          result.risks.push({ risk: risk.trim(), mitigation: (mit||"").trim() });
+        } else if (section === "out") result.outlook += (result.outlook ? " " : "") + line;
+      }
+      if (!result.pillars.length && !result.channelPlays.length) throw new Error("Strategy response was empty");
+      setStrategy(result);
+    } catch (e) {
+      console.error("Strategy error:", e);
+      setStratError(e.message || "Failed to generate strategy");
+    }
+    setStratLoading(false);
+  };
+
+  const fmtFull = v => `$${Math.abs(Math.round(v)).toLocaleString()}`;
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <div className="flex items-center gap-2 mb-1">
+          <Target className="text-purple-600" size={20}/>
+          <h2 className="text-base font-bold text-slate-800">AI Scenario Builder</h2>
+        </div>
+        <p className="text-xs text-slate-500 mb-4 max-w-3xl">
+          Turn a revenue target — by default the worst projected December cash
+          shortfall — into a concrete enrolment mix and a sales &amp; marketing
+          strategy to deliver it. The mix is built from FY26 historical
+          acquisition patterns; the strategy is authored by Gemini.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+            <button onClick={() => setMode("mix")}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${mode==="mix" ? "bg-white shadow text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>
+              Enrolment Mix
+            </button>
+            <button onClick={() => setMode("strategy")}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${mode==="strategy" ? "bg-white shadow text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>
+              Sales &amp; Marketing Strategy
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-semibold text-slate-600">Revenue target:</label>
+            <div className="relative">
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+              <input type="text" value={targetInput}
+                onChange={e => setTargetInput(e.target.value)}
+                onBlur={applyTarget}
+                onKeyDown={e => { if (e.key === "Enter") { applyTarget(); e.currentTarget.blur(); } }}
+                className="w-36 pl-5 pr-2 py-1.5 text-xs font-mono border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
+            <span className="text-[10px] text-slate-400">defaults to worst Dec cash gap</span>
+          </div>
+        </div>
+      </div>
+
+      {mode === "mix" && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+          <h3 className="text-sm font-bold text-slate-800 mb-1">Enrolment Mix Calculator</h3>
+          <p className="text-xs text-slate-500 mb-4">
+            Allocates the {fmtFull(target)} target across courses and locations
+            using FY26 acquisition history.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-5">
+            {[
+              { id: "prorata", label: "Pro-rata Mix",  desc: "Mirrors FY26 revenue share across every course × region." },
+              { id: "premium", label: "Premium Focus", desc: "Concentrates on the top half of courses by unit price." },
+              { id: "volume",  label: "Volume Regions",desc: "Top 3 regions by FY26 enrolment volume." },
+              { id: "smart",   label: "AI Smart Mix",  desc: "Gemini-designed combination weighted on historical demand." },
+            ].map(p => (
+              <button key={p.id} onClick={() => setPreset(p.id)}
+                disabled={p.id === "smart" && !smartMix}
+                className={`text-left p-3 rounded-xl border-2 transition-all ${preset===p.id ? "border-purple-500 bg-purple-50" : "border-slate-100 hover:border-slate-200 bg-white"} ${p.id === "smart" && !smartMix ? "opacity-50 cursor-not-allowed" : ""}`}>
+                <div className="text-xs font-bold text-slate-800 mb-0.5">{p.label}</div>
+                <div className="text-[10px] text-slate-500 leading-snug">{p.desc}</div>
+              </button>
+            ))}
+          </div>
+
+          <div className="mb-5 flex items-center gap-3 flex-wrap">
+            <button onClick={generateSmartMix} disabled={smartLoading}
+              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-xs font-semibold rounded-lg shadow hover:shadow-md disabled:opacity-50">
+              {smartLoading ? <Loader2 size={14} className="animate-spin"/> : <Zap size={14}/>}
+              {smartLoading ? "Generating…" : (smartMix ? "Regenerate AI Smart Mix" : "Generate AI Smart Mix")}
+            </button>
+            {smartError && <span className="text-xs text-rose-600">{smartError}</span>}
+            {smartMix?.rationale && <span className="text-xs text-slate-600 italic max-w-xl">"{smartMix.rationale}"</span>}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+            <div className="rounded-xl border border-slate-100 p-3 bg-slate-50">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Allocated revenue</p>
+              <p className="text-lg font-bold text-slate-800 mt-1">{fmtFull(allocSummary.totalRev)}</p>
+              <p className="text-[10px] text-slate-400">vs target {fmtFull(target)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-100 p-3 bg-slate-50">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Additional units</p>
+              <p className="text-lg font-bold text-slate-800 mt-1">{Math.round(allocSummary.totalUnits).toLocaleString()}</p>
+              <p className="text-[10px] text-slate-400">units of competency</p>
+            </div>
+            <div className="rounded-xl border border-slate-100 p-3 bg-slate-50">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Est. new students</p>
+              <p className="text-lg font-bold text-slate-800 mt-1">~{allocSummary.estStudents.toLocaleString()}</p>
+              <p className="text-[10px] text-slate-400">@ ~4 units/student</p>
+            </div>
+            <div className="rounded-xl border border-slate-100 p-3 bg-slate-50">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Combinations used</p>
+              <p className="text-lg font-bold text-slate-800 mt-1">{allocations.length}</p>
+              <p className="text-[10px] text-slate-400">region × course pairs</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+            <div>
+              <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">By region</h4>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={allocSummary.regions} layout="vertical" margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid stroke="#f1f5f9" horizontal={false}/>
+                  <XAxis type="number" fontSize={10} tickFormatter={v => fmtAUD(v)} tickLine={false} axisLine={false}/>
+                  <YAxis dataKey="region" type="category" fontSize={11} tickLine={false} axisLine={false} width={50}/>
+                  <Tooltip formatter={v => fmtAUD(v, false)} contentStyle={{ borderRadius: 8, border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0/0.1)" }}/>
+                  <Bar dataKey="revenue" fill="#8b5cf6" radius={[0, 6, 6, 0]} name="Allocated revenue"/>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">By course</h4>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={allocSummary.courses.slice(0, 8)} layout="vertical" margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid stroke="#f1f5f9" horizontal={false}/>
+                  <XAxis type="number" fontSize={10} tickFormatter={v => fmtAUD(v)} tickLine={false} axisLine={false}/>
+                  <YAxis dataKey="code" type="category" fontSize={10} tickLine={false} axisLine={false} width={90}/>
+                  <Tooltip formatter={v => fmtAUD(v, false)} contentStyle={{ borderRadius: 8, border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0/0.1)" }}/>
+                  <Bar dataKey="revenue" fill="#06b6d4" radius={[0, 6, 6, 0]} name="Allocated revenue"/>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="border border-slate-100 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 sticky top-0">
+                  <tr className="text-slate-500">
+                    <th className="px-3 py-2 text-left font-semibold">Region</th>
+                    <th className="px-3 py-2 text-left font-semibold">Course</th>
+                    <th className="px-3 py-2 text-right font-semibold">FY26 units</th>
+                    <th className="px-3 py-2 text-right font-semibold">Price</th>
+                    <th className="px-3 py-2 text-right font-semibold">+ Units required</th>
+                    <th className="px-3 py-2 text-right font-semibold">% uplift on FY26</th>
+                    <th className="px-3 py-2 text-right font-semibold">Revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allocations.length === 0 ? (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-slate-400">No allocation — adjust target or preset.</td></tr>
+                  ) : allocations.map(r => {
+                    const uplift = r.units > 0 ? (r.allocUnits / r.units) * 100 : 0;
+                    return (
+                      <tr key={r.key} className="border-t border-slate-50 hover:bg-slate-50">
+                        <td className="px-3 py-2 font-semibold text-slate-700">{r.region}</td>
+                        <td className="px-3 py-2 text-slate-600 font-mono">{r.code}</td>
+                        <td className="px-3 py-2 text-right font-mono text-slate-500">{Math.round(r.units).toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right font-mono text-slate-500">${Math.round(r.price)}</td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-purple-700">+{Math.round(r.allocUnits).toLocaleString()}</td>
+                        <td className={`px-3 py-2 text-right font-mono ${uplift > 25 ? "text-rose-600 font-bold" : uplift > 10 ? "text-amber-600" : "text-slate-500"}`}>
+                          {uplift.toFixed(0)}%
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{fmtFull(r.allocRev)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {allocations.length > 0 && (
+                  <tfoot className="bg-slate-50 border-t-2 border-slate-200">
+                    <tr>
+                      <td colSpan={4} className="px-3 py-2 font-bold text-slate-800 text-right">Total</td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-purple-700">+{Math.round(allocSummary.totalUnits).toLocaleString()}</td>
+                      <td></td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">{fmtFull(allocSummary.totalRev)}</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === "strategy" && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+          <h3 className="text-sm font-bold text-slate-800 mb-1">Sales &amp; Marketing Strategy</h3>
+          <p className="text-xs text-slate-500 mb-4">
+            AI-authored plan to deliver the {fmtFull(target)} target using the
+            current "{preset}" enrolment mix
+            ({Math.round(allocSummary.totalUnits).toLocaleString()} units / ~{allocSummary.estStudents} students
+            across {allocSummary.regions.length} region{allocSummary.regions.length === 1 ? "" : "s"}).
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Time horizon</label>
+              <select value={horizon} onChange={e => setHorizon(e.target.value)}
+                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500">
+                <option value="3 months">3 months</option>
+                <option value="6 months">6 months</option>
+                <option value="9 months">9 months</option>
+                <option value="12 months">12 months</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Preferred channels</label>
+              <div className="flex flex-wrap gap-1.5">
+                {ALL_CHANNELS.map(c => (
+                  <button key={c} onClick={() => toggleChannel(c)}
+                    className={`px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-all ${channels.includes(c) ? "bg-purple-600 text-white border-purple-600" : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"}`}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <button onClick={generateStrategy} disabled={stratLoading}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-xs font-semibold rounded-lg shadow hover:shadow-md disabled:opacity-50 mb-5">
+            {stratLoading ? <Loader2 size={14} className="animate-spin"/> : <Zap size={14}/>}
+            {stratLoading ? "Building strategy…" : (strategy ? "Regenerate Strategy" : "Generate Strategy")}
+          </button>
+
+          {stratError && <div className="mb-4 px-3 py-2 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700">{stratError}</div>}
+
+          {!strategy && !stratLoading && (
+            <div className="text-center py-12 text-slate-400 text-sm border-2 border-dashed border-slate-200 rounded-xl">
+              <Zap size={32} className="mx-auto mb-2 text-slate-300"/>
+              <p className="font-medium">Click "Generate Strategy" for a Gemini-authored plan.</p>
+            </div>
+          )}
+
+          {strategy && (
+            <div className="space-y-5">
+              {strategy.objective && (
+                <div className="p-4 bg-purple-50 border border-purple-100 rounded-xl">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-purple-700 mb-1">Objective</p>
+                  <p className="text-sm text-slate-800">{strategy.objective}</p>
+                </div>
+              )}
+              {strategy.pillars.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">Strategic pillars</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {strategy.pillars.map((p, i) => (
+                      <div key={i} className="p-3 border border-slate-100 rounded-lg">
+                        <p className="text-sm font-bold text-slate-800 mb-1">{p.name}</p>
+                        <p className="text-xs text-slate-600">{p.desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {strategy.channelPlays.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">Channel plays</h4>
+                  <div className="border border-slate-100 rounded-xl overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50">
+                        <tr className="text-slate-500">
+                          <th className="px-3 py-2 text-left font-semibold">Channel</th>
+                          <th className="px-3 py-2 text-left font-semibold">Action</th>
+                          <th className="px-3 py-2 text-left font-semibold">KPI / weekly target</th>
+                          <th className="px-3 py-2 text-left font-semibold">Lead time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {strategy.channelPlays.map((p, i) => (
+                          <tr key={i} className="border-t border-slate-50">
+                            <td className="px-3 py-2 font-semibold text-slate-700">{p.channel}</td>
+                            <td className="px-3 py-2 text-slate-600">{p.action}</td>
+                            <td className="px-3 py-2 text-slate-600">{p.kpi}</td>
+                            <td className="px-3 py-2 text-slate-500">{p.leadTime}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {strategy.regionPlays.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">Region plays</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {strategy.regionPlays.map((r, i) => (
+                      <div key={i} className="p-3 border border-slate-100 rounded-lg flex gap-3">
+                        <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded h-fit">{r.region}</span>
+                        <div className="flex-1">
+                          <p className="text-xs text-slate-700">{r.play}</p>
+                          {r.owner && <p className="text-[10px] text-slate-400 mt-1">Owner: {r.owner}</p>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {strategy.quickWins.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">30-day quick wins</h4>
+                  <ul className="space-y-1.5">
+                    {strategy.quickWins.map((q, i) => (
+                      <li key={i} className="flex items-start gap-2 text-xs text-slate-700">
+                        <CheckCircle size={14} className="text-emerald-500 mt-0.5 shrink-0"/>
+                        <span>{q}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {strategy.risks.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">Risks &amp; mitigations</h4>
+                  <div className="space-y-2">
+                    {strategy.risks.map((r, i) => (
+                      <div key={i} className="p-3 bg-amber-50 border border-amber-100 rounded-lg">
+                        <p className="text-xs font-semibold text-amber-900">{r.risk}</p>
+                        <p className="text-xs text-amber-700 mt-0.5">→ {r.mitigation}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {strategy.outlook && (
+                <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Outlook</p>
+                  <p className="text-sm text-slate-700">{strategy.outlook}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function CashFlowForecastView({ data }) {
   const [cashOverrides, setCashOverrides] = useState({});
   const [editCell, setEditCell] = useState(null);
@@ -8504,6 +9137,7 @@ const NAV = [
   {id:"cashflow",   label:"Cash Flow",     icon:Wallet,          group:"Analytics"},
   {id:"pnl",        label:"P&L vs Budget", icon:FileText,        group:"Analytics"},
   {id:"modeler",   label:"Unit Modeler",  icon:Edit,            group:"Planning"},
+  {id:"scenarios", label:"AI Scenarios",  icon:Target,          group:"Planning"},
   {id:"staffing",  label:"Staffing",      icon:Users,           group:"Planning"},
   {id:"staff",     label:"Staff Planner", icon:Users,           group:"Planning"},
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
@@ -9099,6 +9733,7 @@ export default function App() {
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires} xeroActuals={xeroActuals}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
+      {activeTab==="scenarios" && <AIScenarioBuilder data={data}/>}
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
