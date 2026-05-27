@@ -7191,6 +7191,260 @@ function CpiForecastPanel({ data, draftCpi, appliedCpi, onDraftChange, onApply, 
 }
 
 
+// ─── DECEMBER CASH REQUIREMENT FORECAST & KPI ─────────────────────────────────
+// For each Dec → next May window, computes the closing cash balance needed at
+// end of December to absorb the negative net cash positions of Jan–May without
+// the cash balance falling below a configurable safety floor.
+function DecemberCashRequirementPanel({ data }) {
+  const [buffer, setBuffer] = useState(200000); // board minimum cash floor
+  const [bufferInput, setBufferInput] = useState("200000");
+
+  const rows = useMemo(() => {
+    const opFin = data.operationalFinancials || [];
+    const byMonth = {};
+    opFin.forEach(op => { byMonth[op.month] = op; });
+
+    // Calendar years for which we have Dec-Y AND Jan..May-(Y+1) in the dataset.
+    const yy = (y) => String(y).slice(-2);
+    const candidates = [];
+    for (let y = 2024; y <= 2030; y++) {
+      const dec = byMonth[`Dec-${yy(y)}`];
+      const jan = byMonth[`Jan-${yy(y+1)}`];
+      const may = byMonth[`May-${yy(y+1)}`];
+      if (dec && jan && may) candidates.push(y);
+    }
+
+    return candidates.map(y => {
+      const dec = byMonth[`Dec-${yy(y)}`];
+      const monthNets = ["Jan","Feb","Mar","Apr","May"].map(mk => {
+        const op = byMonth[`${mk}-${yy(y+1)}`];
+        return { mk, label: `${mk}-${yy(y+1)}`, net: op?.netCashflow || 0, isActual: !!op?.isActual };
+      });
+
+      // Cumulative running balance through Jan–May starting from $0 at the
+      // start of Jan. The deepest trough (most negative cumulative point) is
+      // the drawdown the December balance has to absorb.
+      let running = 0;
+      const trajectory = monthNets.map(m => {
+        running += m.net;
+        return { ...m, cumNet: running };
+      });
+      const minCum = Math.min(0, ...trajectory.map(t => t.cumNet));
+      const sumNet = running; // = sum of all five months
+      const negSum = monthNets.filter(m => m.net < 0).reduce((s,m) => s + m.net, 0);
+
+      // Required Dec closing: covers the deepest drawdown AND keeps the cash
+      // balance at or above the safety floor at every point through to May.
+      const required = Math.max(buffer, buffer - minCum);
+      const forecast = dec.closingBalance;
+      const gap = forecast - required; // positive = surplus, negative = shortfall
+
+      // Projected balance trajectory IF we hit the forecast Dec close.
+      const projected = trajectory.map(t => ({ ...t, balance: forecast + t.cumNet }));
+      const minProjected = Math.min(forecast, ...projected.map(p => p.balance));
+
+      return {
+        year: y,
+        decLabel: `Dec-${yy(y)}`,
+        winLabel: `Jan-${yy(y+1)} → May-${yy(y+1)}`,
+        monthNets, trajectory, projected,
+        minCum, sumNet, negSum,
+        forecast, required, gap, minProjected,
+      };
+    });
+  }, [data, buffer]);
+
+  const applyBuffer = () => {
+    const v = parseFloat(bufferInput.replace(/[^0-9.-]/g, ""));
+    if (!isNaN(v) && v >= 0) setBuffer(Math.round(v));
+  };
+
+  const fmtFull = v => `${v < 0 ? "-" : ""}$${Math.abs(Math.round(v)).toLocaleString()}`;
+  const kpiColor = gap => gap >= 0 ? "text-emerald-600" : "text-rose-600";
+
+  const chartData = rows.map(r => ({
+    year: r.decLabel,
+    required: Math.round(r.required),
+    forecast: Math.round(r.forecast),
+    gap: Math.round(r.gap),
+  }));
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+      <div className="flex items-start justify-between gap-4 mb-5">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <Wallet className="text-indigo-600" size={20}/>
+            <h3 className="text-base font-bold text-slate-800">December Cash Requirement — Jan–May Coverage</h3>
+          </div>
+          <p className="text-xs text-slate-500 max-w-2xl">
+            Based on the modelled net cash positions for Jan–May (trend-projected from prior actuals,
+            unit growth and applied wage/CPI settings), this calculates how much cash must be on hand
+            at the end of December to absorb the seasonal negative cashflow window before claims
+            recover, while keeping the cash balance at or above the board safety floor.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <label className="text-xs font-semibold text-slate-600">Safety floor:</label>
+          <div className="relative">
+            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+            <input
+              type="text"
+              value={bufferInput}
+              onChange={e => setBufferInput(e.target.value)}
+              onBlur={applyBuffer}
+              onKeyDown={e => { if (e.key === "Enter") { applyBuffer(); e.currentTarget.blur(); } }}
+              className="w-32 pl-5 pr-2 py-1.5 text-xs font-mono border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="text-center py-10 text-slate-400 text-sm">
+          Not enough months in the dataset to build a Dec → May coverage window.
+        </div>
+      ) : (
+        <>
+          {/* KPI cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5">
+            {rows.map(r => (
+              <div key={r.year} className="rounded-xl border border-slate-100 p-4 bg-slate-50">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Required {r.decLabel}</span>
+                  <span className={`text-xs font-bold ${kpiColor(r.gap)}`}>
+                    {r.gap >= 0 ? "Surplus" : "Shortfall"}
+                  </span>
+                </div>
+                <p className="text-2xl font-bold text-slate-800 mb-1">{fmtFull(r.required)}</p>
+                <p className="text-xs text-slate-500">
+                  Forecast close: <span className="font-mono font-semibold text-slate-700">{fmtFull(r.forecast)}</span>
+                </p>
+                <p className={`text-xs font-bold mt-0.5 ${kpiColor(r.gap)}`}>
+                  Gap: {r.gap >= 0 ? "+" : ""}{fmtFull(r.gap)}
+                </p>
+                <p className="text-[10px] text-slate-400 mt-2">
+                  Deepest Jan–May drawdown: <span className="font-mono">{fmtFull(r.minCum)}</span>
+                </p>
+                <p className="text-[10px] text-slate-400">
+                  Lowest projected balance: <span className={`font-mono font-semibold ${r.minProjected < buffer ? "text-rose-600" : "text-emerald-600"}`}>{fmtFull(r.minProjected)}</span>
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {/* Required vs Forecast chart */}
+          <div className="mb-6">
+            <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider mb-2">Required vs Forecast December Closing Balance</h4>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid stroke="#f1f5f9" vertical={false}/>
+                <XAxis dataKey="year" fontSize={11} tickLine={false} axisLine={false}/>
+                <YAxis fontSize={10} tickFormatter={v => fmtAUD(v)} tickLine={false} axisLine={false}/>
+                <Tooltip formatter={v => fmtAUD(v, false)} contentStyle={{ borderRadius: 8, border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0/0.1)" }}/>
+                <Legend wrapperStyle={{ fontSize: 11 }}/>
+                <ReferenceLine y={buffer} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: "Floor", fontSize: 10, fill: "#b45309", position: "right" }}/>
+                <Bar dataKey="required" name="Required Dec close" fill="#4f46e5" radius={[6,6,0,0]}/>
+                <Bar dataKey="forecast" name="Forecast Dec close" fill="#10b981" radius={[6,6,0,0]}/>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Detail tables */}
+          <div className="space-y-5">
+            {rows.map(r => (
+              <div key={r.year} className="border border-slate-100 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                  <div>
+                    <span className="text-sm font-bold text-slate-800">{r.decLabel} → covers {r.winLabel}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className="text-slate-500">Σ Jan–May net: <span className="font-mono font-semibold text-slate-700">{fmtFull(r.sumNet)}</span></span>
+                    <span className="text-slate-500">Σ negative months: <span className="font-mono font-semibold text-rose-600">{fmtFull(r.negSum)}</span></span>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-white border-b border-slate-100">
+                      <tr className="text-slate-500">
+                        <th className="px-3 py-2 text-left font-semibold">Metric</th>
+                        {r.monthNets.map(m => (
+                          <th key={m.label} className="px-3 py-2 text-right font-semibold">
+                            {m.label}{m.isActual && <span className="ml-1 text-[9px] text-emerald-600">●actual</span>}
+                          </th>
+                        ))}
+                        <th className="px-3 py-2 text-right font-semibold bg-slate-50">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-b border-slate-50">
+                        <td className="px-3 py-2 font-semibold text-slate-700">Net cashflow</td>
+                        {r.monthNets.map(m => (
+                          <td key={m.label} className={`px-3 py-2 text-right font-mono ${m.net < 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                            {m.net >= 0 ? "+" : ""}{fmtFull(m.net)}
+                          </td>
+                        ))}
+                        <td className={`px-3 py-2 text-right font-mono font-bold bg-slate-50 ${r.sumNet < 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                          {r.sumNet >= 0 ? "+" : ""}{fmtFull(r.sumNet)}
+                        </td>
+                      </tr>
+                      <tr className="border-b border-slate-50">
+                        <td className="px-3 py-2 font-semibold text-slate-700">Cumulative from Jan</td>
+                        {r.trajectory.map(t => (
+                          <td key={t.label} className={`px-3 py-2 text-right font-mono ${t.cumNet < 0 ? "text-rose-600" : "text-slate-700"}`}>
+                            {fmtFull(t.cumNet)}
+                          </td>
+                        ))}
+                        <td className="px-3 py-2 text-right font-mono font-bold text-rose-600 bg-slate-50">
+                          min {fmtFull(r.minCum)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-semibold text-slate-700">Projected balance (forecast Dec + cum.)</td>
+                        {r.projected.map(p => (
+                          <td key={p.label} className={`px-3 py-2 text-right font-mono ${p.balance < buffer ? "text-rose-600 font-bold" : "text-slate-700"}`}>
+                            {fmtFull(p.balance)}
+                          </td>
+                        ))}
+                        <td className={`px-3 py-2 text-right font-mono font-bold bg-slate-50 ${r.minProjected < buffer ? "text-rose-600" : "text-emerald-600"}`}>
+                          low {fmtFull(r.minProjected)}
+                        </td>
+                      </tr>
+                    </tbody>
+                    <tfoot className="bg-slate-50 border-t border-slate-200">
+                      <tr>
+                        <td className="px-3 py-2 font-bold text-slate-800">Required {r.decLabel} cash on hand</td>
+                        <td colSpan={5} className="px-3 py-2 text-xs text-slate-500">
+                          = safety floor ({fmtAUD(buffer, false)}) + deepest drawdown ({fmtFull(-r.minCum)})
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold text-indigo-700 bg-indigo-50">
+                          {fmtFull(r.required)}
+                        </td>
+                      </tr>
+                      <tr className={r.gap >= 0 ? "" : "bg-rose-50"}>
+                        <td className="px-3 py-2 font-bold text-slate-800">Gap vs forecast Dec close ({fmtFull(r.forecast)})</td>
+                        <td colSpan={5} className="px-3 py-2 text-xs text-slate-500">
+                          {r.gap >= 0
+                            ? "Forecast cash position covers the Jan–May window."
+                            : `Cash injection or expense deferral of ${fmtFull(-r.gap)} required by ${r.decLabel} to keep balance above floor.`}
+                        </td>
+                        <td className={`px-3 py-2 text-right font-mono font-bold ${kpiColor(r.gap)}`}>
+                          {r.gap >= 0 ? "+" : ""}{fmtFull(r.gap)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
 function CashFlowForecastView({ data }) {
   const [cashOverrides, setCashOverrides] = useState({});
   const [editCell, setEditCell] = useState(null);
@@ -8841,7 +9095,7 @@ export default function App() {
     >
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
-      {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><CashFlowForecastView data={data}/></div>}
+      {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><DecemberCashRequirementPanel data={data}/><CashFlowForecastView data={data}/></div>}
       {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires} xeroActuals={xeroActuals}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
