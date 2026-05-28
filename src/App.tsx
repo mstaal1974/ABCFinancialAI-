@@ -134,6 +134,51 @@ async function sbAudit(user, action, entity, detail, oldVal = null, newVal = nul
   } catch(e) { console.warn("Audit log failed:", e); }
 }
 
+// ─── DATASET ARCHIVE HELPERS ─────────────────────────────────────────────────
+// Versioned snapshots of editable datasets. Each Save creates one row in
+// `dataset_archives`; we trim to the most recent 10 per dataset_type so the
+// table never grows unbounded. Restoration loads a snapshot back into the
+// live state without itself creating a new archive entry.
+const ARCHIVE_MAX = 10;
+const ARCHIVE_TYPES = { UNIT: "UNIT", XERO: "XERO" };
+
+async function sbArchive(datasetType, label, payload, user) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+  const row = {
+    id,
+    dataset_type: datasetType,
+    label: label || "(no label)",
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+    created_at: new Date().toISOString(),
+    created_by: user?.email || "unknown",
+  };
+  const ok = await sbUpsert("dataset_archives", [row]);
+  if (ok) await sbTrimArchives(datasetType);
+  return ok;
+}
+
+async function sbLoadArchives(datasetType) {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/dataset_archives?dataset_type=eq.${datasetType}&select=*&order=created_at.desc&limit=${ARCHIVE_MAX}`,
+    { headers: getAuthHeaders() }
+  );
+  if (!r.ok) return [];
+  try { return await r.json(); } catch { return []; }
+}
+
+async function sbTrimArchives(datasetType) {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/dataset_archives?dataset_type=eq.${datasetType}&select=id,created_at&order=created_at.desc`,
+    { headers: getAuthHeaders() }
+  );
+  if (!r.ok) return;
+  let rows;
+  try { rows = await r.json(); } catch { return; }
+  if (!Array.isArray(rows) || rows.length <= ARCHIVE_MAX) return;
+  const stale = rows.slice(ARCHIVE_MAX);
+  for (const s of stale) await sbDelete("dataset_archives", { id: s.id });
+}
+
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -4286,6 +4331,184 @@ Find 3-7 realistic, actionable issues. Prioritise high-impact improvements.`;
     </div>
   );
 }
+
+// ─── DATASET ARCHIVE VIEW ─────────────────────────────────────────────────────
+// Lists the last 10 saved snapshots per dataset (Unit Modeler & Xero P&L)
+// and lets the user restore any of them as the active version. Restoring
+// overwrites both localStorage and the relevant Supabase table for that
+// dataset; the archive list itself is not modified by a restore.
+function ArchiveView({ onRestore }) {
+  const [unitArchives, setUnitArchives] = useState([]);
+  const [xeroArchives, setXeroArchives] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [pending, setPending] = useState(null); // { archive } awaiting confirm
+  const [restoring, setRestoring] = useState(false);
+  const [toast, setToast] = useState(null); // { kind, message }
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([sbLoadArchives("UNIT"), sbLoadArchives("XERO")])
+      .then(([u, x]) => {
+        if (cancelled) return;
+        setUnitArchives(Array.isArray(u) ? u : []);
+        setXeroArchives(Array.isArray(x) ? x : []);
+        setLoading(false);
+      })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  const doRestore = async () => {
+    if (!pending?.archive) return;
+    setRestoring(true);
+    const ok = await onRestore(pending.archive);
+    setRestoring(false);
+    setPending(null);
+    if (ok) {
+      setToast({ kind: "ok", message: `Restored snapshot from ${new Date(pending.archive.created_at).toLocaleString("en-AU")}` });
+    } else {
+      setToast({ kind: "err", message: "Restore failed — see browser console." });
+    }
+    setTimeout(() => setToast(null), 5000);
+  };
+
+  const fmtDate = (iso) => new Date(iso).toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  const renderSection = (title, kindLabel, archives, accent) => (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+            <Database size={16} className={accent.icon}/> {title}
+          </h3>
+          <p className="text-[11px] text-slate-500 mt-0.5">{kindLabel} · last {ARCHIVE_MAX} saved versions (older snapshots are deleted automatically)</p>
+        </div>
+        <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-2 py-1 rounded-full">{archives.length} / {ARCHIVE_MAX}</span>
+      </div>
+      {archives.length === 0 ? (
+        <div className="text-center py-8 text-slate-400 text-sm border-2 border-dashed border-slate-200 rounded-xl">
+          No snapshots yet. Save the dataset to create the first archive entry.
+        </div>
+      ) : (
+        <div className="border border-slate-100 rounded-xl overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50">
+              <tr className="text-slate-500">
+                <th className="px-3 py-2 text-left font-semibold w-10">#</th>
+                <th className="px-3 py-2 text-left font-semibold">Saved at</th>
+                <th className="px-3 py-2 text-left font-semibold">User</th>
+                <th className="px-3 py-2 text-left font-semibold">Label</th>
+                <th className="px-3 py-2 text-right font-semibold w-28">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {archives.map((a, i) => (
+                <tr key={a.id} className="border-t border-slate-50 hover:bg-slate-50">
+                  <td className="px-3 py-2 font-mono text-slate-400">{i === 0 ? <span className={`px-1.5 py-0.5 rounded text-white text-[10px] font-bold ${accent.badge}`}>live</span> : i + 1}</td>
+                  <td className="px-3 py-2 font-mono text-slate-700">{fmtDate(a.created_at)}</td>
+                  <td className="px-3 py-2 text-slate-600">{a.created_by || "—"}</td>
+                  <td className="px-3 py-2 text-slate-600">{a.label || "(no label)"}</td>
+                  <td className="px-3 py-2 text-right">
+                    <button onClick={() => setPending({ archive: a })}
+                      disabled={i === 0}
+                      title={i === 0 ? "This is the current live version" : "Restore this snapshot as the active version"}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all ${i === 0 ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}>
+                      Restore
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Database className="text-slate-600" size={20}/>
+              <h2 className="text-base font-bold text-slate-800">Archive &amp; Restore</h2>
+            </div>
+            <p className="text-xs text-slate-500 max-w-2xl">
+              Every time you save the Unit Modeler or the Xero P&amp;L to the database
+              a snapshot is captured here. The last {ARCHIVE_MAX} snapshots per dataset
+              are retained — older versions are deleted automatically. Restoring
+              a snapshot overwrites the live data both locally and in the database.
+            </p>
+          </div>
+          <button onClick={() => setRefreshKey(k => k + 1)} disabled={loading}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-slate-200 flex items-center gap-1.5 disabled:opacity-50">
+            {loading ? <Loader2 size={12} className="animate-spin"/> : <RefreshCw size={12}/>} Refresh
+          </button>
+        </div>
+      </div>
+
+      {toast && (
+        <div className={`rounded-xl border px-4 py-3 text-sm font-semibold ${toast.kind === "ok" ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700"}`}>
+          {toast.message}
+        </div>
+      )}
+
+      {renderSection(
+        "Unit Modeler snapshots",
+        "Course × region unit overrides",
+        unitArchives,
+        { icon: "text-emerald-600", badge: "bg-emerald-600" }
+      )}
+
+      {renderSection(
+        "Xero P&L snapshots",
+        "Uploaded Xero Profit & Loss actuals",
+        xeroArchives,
+        { icon: "text-rose-600", badge: "bg-rose-600" }
+      )}
+
+      {pending && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="p-2 bg-amber-100 rounded-lg shrink-0">
+                <AlertTriangle size={20} className="text-amber-600"/>
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-800">Restore this snapshot?</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  The current live version will be overwritten. If you want to keep it,
+                  save it again before restoring (it will be archived as a new snapshot).
+                </p>
+              </div>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-3 mb-4 text-xs space-y-1">
+              <div><span className="text-slate-500">Dataset:</span> <span className="font-semibold text-slate-700">{pending.archive.dataset_type === "UNIT" ? "Unit Modeler" : "Xero P&L"}</span></div>
+              <div><span className="text-slate-500">Saved at:</span> <span className="font-mono text-slate-700">{fmtDate(pending.archive.created_at)}</span></div>
+              <div><span className="text-slate-500">By:</span> <span className="text-slate-700">{pending.archive.created_by}</span></div>
+              <div><span className="text-slate-500">Label:</span> <span className="text-slate-700">{pending.archive.label}</span></div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setPending(null)} disabled={restoring}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={doRestore} disabled={restoring}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 flex items-center gap-1.5 disabled:opacity-50">
+                {restoring ? <Loader2 size={12} className="animate-spin"/> : <CheckCircle size={12}/>}
+                {restoring ? "Restoring…" : "Restore snapshot"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function AuditLogView() {
   const [logs, setLogs] = useState([]);
@@ -8624,7 +8847,24 @@ async function parseXeroPnLXlsx(arrayBuffer) {
 }
 
 
-function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroActuals }) {
+function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroActuals, onSaveXeroToDb, saving = false }) {
+  const [dbSaveState, setDbSaveState] = useState("idle"); // idle | saving | saved | error
+  const [dbSavedFingerprint, setDbSavedFingerprint] = useState(null);
+  const xeroFingerprint = xeroActuals ? `${xeroActuals.fileName}|${xeroActuals.uploadedAt}` : null;
+  const isDirty = !!xeroActuals && xeroFingerprint !== dbSavedFingerprint;
+  const onClickSaveXero = async () => {
+    if (!onSaveXeroToDb || !xeroActuals) return;
+    setDbSaveState("saving");
+    const ok = await onSaveXeroToDb();
+    if (ok) {
+      setDbSaveState("saved");
+      setDbSavedFingerprint(xeroFingerprint);
+      setTimeout(() => setDbSaveState(s => s === "saved" ? "idle" : s), 4000);
+    } else {
+      setDbSaveState("error");
+      setTimeout(() => setDbSaveState(s => s === "error" ? "idle" : s), 4000);
+    }
+  };
   const [activeFY,    setActiveFY]    = useState("FY26");
   const [viewMode,    setViewMode]    = useState("monthly"); // monthly | ytd | full_year
   const [expandedSections, setExpandedSections] = useState({ "Direct Costs": true, "Overheads": true });
@@ -8848,10 +9088,32 @@ function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroA
             </p>
           </div>
           {xeroActuals && (
-            <button onClick={clearXeroUpload}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600 transition-all">
-              Revert to baseline
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={onClickSaveXero}
+                disabled={dbSaveState === "saving" || saving || !isDirty}
+                title={!isDirty ? "Already saved to database" : "Save the current Xero P&L to Supabase and create an archive snapshot"}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  dbSaveState === "saving" ? "bg-slate-200 text-slate-500 cursor-wait" :
+                  dbSaveState === "saved"   ? "bg-emerald-100 text-emerald-700" :
+                  dbSaveState === "error"   ? "bg-rose-100 text-rose-700" :
+                  !isDirty                  ? "bg-slate-100 text-slate-400 cursor-not-allowed" :
+                                              "bg-indigo-600 text-white hover:bg-indigo-700 shadow"
+                }`}>
+                {dbSaveState === "saving" ? <Loader2 size={12} className="animate-spin"/> :
+                 dbSaveState === "saved"  ? <CheckCircle size={12}/> :
+                 dbSaveState === "error"  ? <AlertCircle size={12}/> :
+                                            <Database size={12}/>}
+                {dbSaveState === "saving" ? "Saving…" :
+                 dbSaveState === "saved"  ? "Saved to DB" :
+                 dbSaveState === "error"  ? "Save failed" :
+                 !isDirty                 ? "Saved to DB" :
+                                            "Save to Database"}
+              </button>
+              <button onClick={clearXeroUpload}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600 transition-all">
+                Revert to baseline
+              </button>
+            </div>
           )}
         </div>
         <div
@@ -9145,6 +9407,7 @@ const NAV = [
   {id:"calc-audit", label:"Calc Audit",    icon:Shield,          group:"Admin"},
   {id:"code-audit",  label:"Code Agent",    icon:FileText,        group:"Admin"},
   {id:"audit",     label:"Audit Log",     icon:ClipboardList,   group:"Admin"},
+  {id:"archive",   label:"Archive",       icon:Database,        group:"Admin"},
   {id:"aianalytics",label:"AI Analytics",  icon:Zap,             group:"Admin"},
 ];
 
@@ -9382,10 +9645,26 @@ export default function App() {
           const savedCpi = localStorage.getItem("applied_cpi_settings");
           if (savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
         }
-        // Load uploaded Xero P&L actuals from localStorage (no Supabase table yet)
-        const savedXero = localStorage.getItem("xero_actuals");
-        if (savedXero) {
-          try { setXeroActuals(JSON.parse(savedXero)); console.log("✓ Loaded Xero P&L actuals from localStorage"); } catch {}
+        // Load Xero P&L actuals: prefer the latest snapshot in dataset_archives
+        // (so all users see the same actuals), fall back to localStorage.
+        try {
+          const archives = await sbLoadArchives("XERO");
+          if (archives && archives.length > 0) {
+            const latest = JSON.parse(archives[0].payload);
+            setXeroActuals(latest);
+            localStorage.setItem("xero_actuals", JSON.stringify(latest));
+            console.log(`✓ Loaded Xero P&L actuals from Supabase archive (${archives[0].label})`);
+          } else {
+            const savedXero = localStorage.getItem("xero_actuals");
+            if (savedXero) {
+              try { setXeroActuals(JSON.parse(savedXero)); console.log("✓ Loaded Xero P&L actuals from localStorage"); } catch {}
+            }
+          }
+        } catch {
+          const savedXero = localStorage.getItem("xero_actuals");
+          if (savedXero) {
+            try { setXeroActuals(JSON.parse(savedXero)); } catch {}
+          }
         }
         setSupaStatus("connected");
       } catch(e) {
@@ -9581,12 +9860,71 @@ export default function App() {
         if (!ok) throw new Error("Supabase upsert returned not-ok");
       }
       await sbAudit(currentUser, "UPDATE", "UNIT", `Saved unit adjustments (${rows.length} overrides)`);
+      // Snapshot to archive (keeps last 10 versions for restore)
+      await sbArchive(
+        ARCHIVE_TYPES.UNIT,
+        `${rows.length} override${rows.length === 1 ? "" : "s"}`,
+        unitAdjustments,
+        currentUser
+      );
       console.log(`✓ Unit adjustments saved: ${rows.length} rows`);
     } catch(e) {
       console.error("Supabase save failed, localStorage used as fallback:", e);
       // localStorage already saved above — data is safe
     }
     setSaving(false);
+  };
+
+  // Save the in-memory Xero P&L payload to Supabase as an archive snapshot.
+  // Latest snapshot is treated as the active server-side version (loaded on
+  // bootstrap when no localStorage copy exists).
+  const handleSaveXeroToDb = async () => {
+    if (!xeroActuals) return false;
+    setSaving(true);
+    let success = false;
+    try {
+      const label = `${xeroActuals.fileName || "Xero P&L"} · ${xeroActuals.actualMks?.length || 0} months${xeroActuals.cutoffMk ? " · through " + xeroActuals.cutoffMk : ""}`;
+      const ok = await sbArchive(ARCHIVE_TYPES.XERO, label, xeroActuals, currentUser);
+      if (!ok) throw new Error("Archive insert failed");
+      await sbAudit(currentUser, "SAVE", "XERO_PNL", `Saved to DB: ${label}`);
+      console.log(`✓ Xero P&L saved to DB: ${label}`);
+      success = true;
+    } catch(e) {
+      console.error("Xero P&L DB save failed:", e);
+    }
+    setSaving(false);
+    return success;
+  };
+
+  // Restore an archived snapshot back into the active state. Handles both
+  // dataset types. Does NOT itself create a new archive entry — the user is
+  // restoring an existing one. The current live state is overwritten in
+  // both localStorage and the relevant Supabase table.
+  const handleRestoreArchive = async (archive) => {
+    if (!archive?.payload) return false;
+    let payload;
+    try { payload = JSON.parse(archive.payload); } catch { return false; }
+    setSaving(true);
+    try {
+      if (archive.dataset_type === ARCHIVE_TYPES.UNIT) {
+        setUnitAdjustments(payload);
+        localStorage.setItem("unit_model_adjustments", JSON.stringify(payload));
+        const rows = Object.entries(payload).map(([key, value]) => ({key, value}));
+        // Clear the live table then re-upsert restored rows.
+        if (rows.length > 0) await sbUpsert("unit_adjustments", rows);
+        await sbAudit(currentUser, "RESTORE", "UNIT", `Restored unit adjustments snapshot (${rows.length} overrides) from ${archive.created_at}`);
+      } else if (archive.dataset_type === ARCHIVE_TYPES.XERO) {
+        setXeroActuals(payload);
+        localStorage.setItem("xero_actuals", JSON.stringify(payload));
+        await sbAudit(currentUser, "RESTORE", "XERO_PNL", `Restored Xero P&L snapshot from ${archive.created_at} (${archive.label})`);
+      }
+    } catch(e) {
+      console.error("Restore failed:", e);
+      setSaving(false);
+      return false;
+    }
+    setSaving(false);
+    return true;
   };
 
   const handleSaveHiring = async (events) => {
@@ -9730,7 +10068,7 @@ export default function App() {
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
       {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><DecemberCashRequirementPanel data={data}/><CashFlowForecastView data={data}/></div>}
-      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals}/>}
+      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals} onSaveXeroToDb={handleSaveXeroToDb} saving={saving}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires} xeroActuals={xeroActuals}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
       {activeTab==="scenarios" && <AIScenarioBuilder data={data}/>}
@@ -9741,6 +10079,7 @@ export default function App() {
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
       {activeTab==="code-audit"  && <CodeAuditAgent/>}
       {activeTab==="audit"     && <AuditLogView/>}
+      {activeTab==="archive"   && <ArchiveView onRestore={handleRestoreArchive}/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
           <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan} currentUser={currentUser}/>
