@@ -27,6 +27,36 @@ if (!SUPABASE_URL || !SUPABASE_ANON) {
   );
 }
 
+// Throw a clear, user-facing error when the app was built without Supabase config.
+// Without this, fetch() targets `undefined/auth/v1/...`, which resolves against the
+// app's own origin and returns the host's HTML 404 page ("The page could not be
+// found") — producing the confusing "Unexpected token 'T' ... is not valid JSON".
+function assertConfigured() {
+  if (!SUPABASE_URL || !SUPABASE_ANON) {
+    throw new Error(
+      "App is not configured: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are missing. " +
+      "Set them in your deployment environment and redeploy."
+    );
+  }
+}
+
+// Parse a fetch response as JSON, but fail loudly if the body isn't JSON (e.g. an
+// HTML 404/500 page from the host or a proxy) instead of throwing an opaque
+// "Unexpected token" SyntaxError.
+async function readJson(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const snippet = text.slice(0, 120).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `Server returned ${r.status}${r.statusText ? " " + r.statusText : ""} (not JSON). ` +
+      (snippet ? `Response began: "${snippet}". ` : "") +
+      "Check that VITE_SUPABASE_URL is correct and the backend is reachable."
+    );
+  }
+}
+
 // ── Auth token management ─────────────────────────────────────────────────────
 let _authToken = null; // live access token, set after login
 function getAuthHeaders(token) {
@@ -36,12 +66,13 @@ function getAuthHeaders(token) {
 
 // ── Supabase Auth REST helpers ────────────────────────────────────────────────
 async function sbSignIn(email, password) {
+  assertConfigured();
   const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
     method: "POST",
     headers: { apikey: SUPABASE_ANON, "Content-Type": "application/json" },
     body: JSON.stringify({ email, password })
   });
-  const data = await r.json();
+  const data = await readJson(r);
   if (!r.ok) throw new Error(data.error_description || data.msg || "Login failed");
   _authToken = data.access_token;
   // Persist session to sessionStorage (clears on tab close)
@@ -87,7 +118,7 @@ async function sbGetSession() {
         body: JSON.stringify({ refresh_token: session.refresh_token })
       });
       if (!r.ok) { sessionStorage.removeItem("sb_session"); return null; }
-      const data = await r.json();
+      const data = await readJson(r);
       _authToken = data.access_token;
       const updated = { ...session, access_token: data.access_token, expires_at: Date.now() + (data.expires_in * 1000) };
       sessionStorage.setItem("sb_session", JSON.stringify(updated));
