@@ -14,8 +14,18 @@ import {
 } from "lucide-react";
 
 // ─── SUPABASE CONFIG & AUTH ──────────────────────────────────────────────────
-const SUPABASE_URL = "https://juygejpmyujvahsxnrxa.supabase.co";
-const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1eWdlanBteXVqdmFoc3hucnhhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4NDI4NjAsImV4cCI6MjA4NzQxODg2MH0.OgkqrQ8YHvRHQs-m5Qe58EYtFxRPK29N_ce0kM2tUfw";
+// Credentials come from environment variables (Vite injects VITE_* at build time).
+// Never hardcode keys here. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in
+// your deployment environment, or a local .env (gitignored). See .env.example.
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_ANON) {
+  console.error(
+    "Supabase config missing: set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in " +
+    "your environment (.env for local dev, host env vars for deploys). See .env.example."
+  );
+}
 
 // ── Auth token management ─────────────────────────────────────────────────────
 let _authToken = null; // live access token, set after login
