@@ -9,7 +9,8 @@ import {
   Plus, Trash2, CalendarClock, AlertCircle, ArrowRight, Wallet,
   Save, X, Tag, AlertTriangle, RefreshCw, ChevronDown, Database, Upload, BarChart2,
   LogOut, Lock, Eye, EyeOff, Shield, ClipboardList, UserCircle, KeyRound,
-  Bell, BellRing, FileText, TrendingUp as TrendUp, Zap, ChevronRight, CheckCircle, XCircle, Clock
+  Bell, BellRing, FileText, TrendingUp as TrendUp, Zap, ChevronRight, CheckCircle, XCircle, Clock,
+  RotateCcw, History
 } from "lucide-react";
 
 // ─── SUPABASE CONFIG & AUTH ──────────────────────────────────────────────────
@@ -4287,7 +4288,204 @@ Find 3-7 realistic, actionable issues. Prioritise high-impact improvements.`;
   );
 }
 
-function AuditLogView() {
+// ─── POINT-IN-TIME RESTORE (Unit Modeller) ───────────────────────────────────
+// Reconstructs unit_adjustments to the state it held at a chosen moment, using
+// the audit log. For every cell edited AFTER the cutoff, the value it had AT the
+// cutoff is the `old_value` of that cell's FIRST edit after the cutoff. Cells not
+// touched after the cutoff are already correct and left alone.
+function RestorePanel({ currentUser }) {
+  const [cutoff, setCutoff] = useState("");
+  const [phase, setPhase] = useState("idle"); // idle | loading | ready | applying | done | error
+  const [plan, setPlan] = useState(null);
+  const [error, setError] = useState("");
+
+  const fmtLocal = (s) => { try { return new Date(s).toLocaleString("en-AU", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" }); } catch { return s; } };
+
+  const runPreview = async () => {
+    setError(""); setPlan(null);
+    if (!cutoff) { setError("Pick the date and time you want to restore back to."); return; }
+    const cutoffDate = new Date(cutoff);
+    if (isNaN(cutoffDate.getTime())) { setError("That date/time isn't valid."); return; }
+    setPhase("loading");
+    try {
+      const cutoffISO = cutoffDate.toISOString();
+      const url = `${SUPABASE_URL}/rest/v1/audit_log?select=created_at,detail,old_value`
+        + `&entity=eq.UNIT&action=eq.UPDATE`
+        + `&created_at=gte.${encodeURIComponent(cutoffISO)}`
+        + `&order=created_at.asc&limit=10000`;
+      const r = await fetch(url, { headers: getAuthHeaders() });
+      if (!r.ok) throw new Error(`Could not read the audit log (HTTP ${r.status}).`);
+      const rows = await r.json();
+
+      // Earliest edit after cutoff wins (rows are ascending) → value AT cutoff.
+      const seen = new Map();
+      for (const row of (rows || [])) {
+        const parts = (row.detail || "").split(" · ");
+        if (parts.length !== 3) continue; // skip summary rows e.g. "Saved unit adjustments (N)"
+        const key = parts.join("|");
+        if (!seen.has(key)) seen.set(key, row.old_value);
+      }
+
+      const currentRows = await sbGet("unit_adjustments");
+      const currentMap = {};
+      (currentRows || []).forEach(row => { if (row.key) currentMap[row.key] = row.value; });
+
+      const restores = [], deletes = [];
+      for (const [key, ov] of seen) {
+        if (ov === null || ov === undefined) {
+          if (key in currentMap) deletes.push({ key, from: currentMap[key] });
+        } else {
+          const target = Number(ov);
+          if (currentMap[key] !== target) restores.push({ key, value: target, from: currentMap[key] });
+        }
+      }
+      setPlan({ restores, deletes, cutoffISO, touched: seen.size });
+      setPhase("ready");
+    } catch (e) {
+      setError(e.message || String(e)); setPhase("error");
+    }
+  };
+
+  const applyRestore = async () => {
+    if (!plan) return;
+    const total = plan.restores.length + plan.deletes.length;
+    if (total === 0) return;
+    const ok = window.confirm(
+      `Restore Unit Modeller data to ${fmtLocal(cutoff)}?\n\n`
+      + `• ${plan.restores.length} cell(s) will be set back to their earlier value\n`
+      + `• ${plan.deletes.length} cell(s) added after that time will be removed (revert to baseline)\n\n`
+      + `This writes directly to the live database. Continue?`
+    );
+    if (!ok) return;
+    setPhase("applying"); setError("");
+    try {
+      if (plan.restores.length) {
+        const up = await sbUpsert("unit_adjustments", plan.restores.map(({ key, value }) => ({ key, value })));
+        if (!up) throw new Error("Failed to write the restored values.");
+      }
+      for (let i = 0; i < plan.deletes.length; i += 25) {
+        const chunk = plan.deletes.slice(i, i + 25);
+        const res = await Promise.all(chunk.map(({ key }) => sbDelete("unit_adjustments", { key })));
+        if (res.some(x => !x)) throw new Error("Failed to remove some cells.");
+      }
+      await sbAudit(currentUser, "RESTORE", "UNIT",
+        `Restored Unit Modeller to ${cutoff} — ${plan.restores.length} reset, ${plan.deletes.length} removed`);
+
+      // Refresh this browser's cache so it can't re-upload stale values on next save.
+      const fresh = await sbGet("unit_adjustments");
+      const map = {};
+      (fresh || []).forEach(row => { if (row.key && row.value !== null) map[row.key] = row.value; });
+      localStorage.setItem("unit_model_adjustments", JSON.stringify(map));
+
+      setPhase("done");
+      setTimeout(() => window.location.reload(), 1400);
+    } catch (e) {
+      setError(e.message || String(e)); setPhase("error");
+    }
+  };
+
+  const changeCount = plan ? plan.restores.length + plan.deletes.length : 0;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+        <div className="p-2 rounded-lg bg-amber-500 text-white shrink-0"><History size={16}/></div>
+        <div>
+          <h2 className="text-base font-bold text-slate-800">Restore to a point in time</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Roll Unit Modeller data back to how it looked at a chosen moment, using the audit history.</p>
+        </div>
+      </div>
+
+      <div className="p-5 space-y-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Restore back to</label>
+            <input type="datetime-local" value={cutoff} onChange={e=>{ setCutoff(e.target.value); setPlan(null); setPhase("idle"); }}
+              className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-amber-400 outline-none"/>
+          </div>
+          <button onClick={runPreview} disabled={phase==="loading"||phase==="applying"}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-white hover:bg-slate-900 disabled:opacity-50 flex items-center gap-2">
+            {phase==="loading" ? <><Loader2 size={15} className="animate-spin"/>Checking…</> : <><RefreshCw size={15}/>Preview changes</>}
+          </button>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-2 text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+            <AlertTriangle size={15} className="mt-0.5 shrink-0"/><span>{error}</span>
+          </div>
+        )}
+
+        {phase==="done" && (
+          <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+            <CheckCircle size={15}/><span>Restore complete — reloading the app…</span>
+          </div>
+        )}
+
+        {plan && phase!=="done" && (
+          changeCount === 0 ? (
+            <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+              <CheckCircle size={15} className="text-emerald-500"/>
+              <span>Nothing to restore — no Unit Modeller changes were made after {fmtLocal(cutoff)}.</span>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label:"Cells touched since", value: plan.touched, color:"text-slate-700" },
+                  { label:"Will reset to earlier value", value: plan.restores.length, color:"text-blue-700" },
+                  { label:"Will remove (→ baseline)", value: plan.deletes.length, color:"text-rose-700" },
+                ].map(s => (
+                  <div key={s.label} className="bg-slate-50 border border-slate-100 rounded-lg p-3">
+                    <p className="text-[11px] text-slate-500">{s.label}</p>
+                    <p className={`text-2xl font-black ${s.color}`}>{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border border-slate-100 rounded-lg overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-100 text-slate-600">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-semibold">Cell (region | code | month)</th>
+                      <th className="px-3 py-2 text-left font-semibold">Current</th>
+                      <th className="px-3 py-2 text-left font-semibold">Will become</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...plan.restores.map(r=>({ key:r.key, from:r.from, to:r.value })),
+                      ...plan.deletes.map(d=>({ key:d.key, from:d.from, to:"— (baseline)" }))]
+                      .slice(0, 15).map(row => (
+                      <tr key={row.key} className="border-b border-slate-50">
+                        <td className="px-3 py-1.5 font-mono text-slate-700">{row.key}</td>
+                        <td className="px-3 py-1.5 font-mono text-rose-600">{row.from ?? "—"}</td>
+                        <td className="px-3 py-1.5 font-mono text-emerald-700">{String(row.to)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {changeCount > 15 && (
+                  <div className="px-3 py-1.5 bg-slate-50 text-[11px] text-slate-400 border-t">…and {changeCount - 15} more</div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <AlertTriangle size={13} className="shrink-0"/>
+                <span>This writes straight to the live database. There's no automatic backup — review the table above before applying.</span>
+              </div>
+
+              <button onClick={applyRestore} disabled={phase==="applying"}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2">
+                {phase==="applying" ? <><Loader2 size={15} className="animate-spin"/>Restoring…</> : <><RotateCcw size={15}/>Apply restore ({changeCount} changes)</>}
+              </button>
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AuditLogView({ currentUser }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ entity: "all", action: "all", user: "all", search: "" });
@@ -4350,6 +4548,9 @@ function AuditLogView() {
 
   return (
     <div className="space-y-5">
+      {/* Point-in-time restore */}
+      <RestorePanel currentUser={currentUser}/>
+
       {/* Header */}
       <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -8851,7 +9052,7 @@ export default function App() {
       {activeTab==="data"      && <RawDataTable {...props}/>}
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
       {activeTab==="code-audit"  && <CodeAuditAgent/>}
-      {activeTab==="audit"     && <AuditLogView/>}
+      {activeTab==="audit"     && <AuditLogView currentUser={currentUser}/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
           <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan} currentUser={currentUser}/>
