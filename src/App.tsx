@@ -4346,6 +4346,17 @@ function RestorePanel({ currentUser }) {
     }
   };
 
+  // Builds an audit_log row matching the schema used by sbAudit().
+  const mkAuditRow = (action, entity, detail, oldVal, newVal, idx = 0) => ({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}-${idx}`,
+    user_email: currentUser?.email || "unknown",
+    user_name: currentUser?.user_metadata?.full_name || currentUser?.email?.split("@")[0] || "unknown",
+    action, entity, detail,
+    old_value: (oldVal !== null && oldVal !== undefined) ? JSON.stringify(oldVal) : null,
+    new_value: (newVal !== null && newVal !== undefined) ? JSON.stringify(newVal) : null,
+    created_at: new Date().toISOString(),
+  });
+
   const applyRestore = async () => {
     if (!plan) return;
     const total = plan.restores.length + plan.deletes.length;
@@ -4354,11 +4365,20 @@ function RestorePanel({ currentUser }) {
       `Restore Unit Modeller data to ${fmtLocal(cutoff)}?\n\n`
       + `• ${plan.restores.length} cell(s) will be set back to their earlier value\n`
       + `• ${plan.deletes.length} cell(s) added after that time will be removed (revert to baseline)\n\n`
-      + `This writes directly to the live database. Continue?`
+      + `A full backup of the current data is saved to the audit log first, so this can be undone. Continue?`
     );
     if (!ok) return;
     setPhase("applying"); setError("");
     try {
+      // 1. Auto-backup: snapshot the CURRENT state into the audit log before any change.
+      const beforeRows = await sbGet("unit_adjustments");
+      const beforeMap = {};
+      (beforeRows || []).forEach(row => { if (row.key && row.value !== null) beforeMap[row.key] = row.value; });
+      const backupOk = await sbUpsert("audit_log", [mkAuditRow("BACKUP", "UNIT",
+        `Auto-backup of ${Object.keys(beforeMap).length} cells before restore to ${cutoff}`, null, beforeMap, 0)]);
+      if (!backupOk) throw new Error("Couldn't save the safety backup — restore aborted, nothing changed.");
+
+      // 2. Apply the restore.
       if (plan.restores.length) {
         const up = await sbUpsert("unit_adjustments", plan.restores.map(({ key, value }) => ({ key, value })));
         if (!up) throw new Error("Failed to write the restored values.");
@@ -4368,14 +4388,23 @@ function RestorePanel({ currentUser }) {
         const res = await Promise.all(chunk.map(({ key }) => sbDelete("unit_adjustments", { key })));
         if (res.some(x => !x)) throw new Error("Failed to remove some cells.");
       }
-      await sbAudit(currentUser, "RESTORE", "UNIT",
-        `Restored Unit Modeller to ${cutoff} — ${plan.restores.length} reset, ${plan.deletes.length} removed`);
 
-      // Refresh this browser's cache so it can't re-upload stale values on next save.
-      const fresh = await sbGet("unit_adjustments");
-      const map = {};
-      (fresh || []).forEach(row => { if (row.key && row.value !== null) map[row.key] = row.value; });
-      localStorage.setItem("unit_model_adjustments", JSON.stringify(map));
+      // 3. Log every change per-cell so this restore is itself reversible via point-in-time.
+      const changeRows = [
+        ...plan.restores.map((r, i) => mkAuditRow("UPDATE", "UNIT", r.key.split("|").join(" · "), r.from, r.value, i + 1)),
+        ...plan.deletes.map((d, i) => mkAuditRow("UPDATE", "UNIT", d.key.split("|").join(" · "), d.from, null, i + 1 + plan.restores.length)),
+      ];
+      for (let i = 0; i < changeRows.length; i += 100) {
+        await sbUpsert("audit_log", changeRows.slice(i, i + 100));
+      }
+      await sbAudit(currentUser, "RESTORE", "UNIT",
+        `Restored Unit Modeller to ${cutoff} — ${plan.restores.length} reset, ${plan.deletes.length} removed (backup saved)`);
+
+      // 4. Refresh this browser's cache so it can't re-upload stale values on next save.
+      const after = await sbGet("unit_adjustments");
+      const freshMap = {};
+      (after || []).forEach(row => { if (row.key && row.value !== null) freshMap[row.key] = row.value; });
+      localStorage.setItem("unit_model_adjustments", JSON.stringify(freshMap));
 
       setPhase("done");
       setTimeout(() => window.location.reload(), 1400);
@@ -4417,7 +4446,7 @@ function RestorePanel({ currentUser }) {
 
         {phase==="done" && (
           <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-            <CheckCircle size={15}/><span>Restore complete — reloading the app…</span>
+            <CheckCircle size={15}/><span>Restore complete — backup saved to the audit log. Reloading the app…</span>
           </div>
         )}
 
@@ -4468,9 +4497,9 @@ function RestorePanel({ currentUser }) {
                 )}
               </div>
 
-              <div className="flex items-center gap-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                <AlertTriangle size={13} className="shrink-0"/>
-                <span>This writes straight to the live database. There's no automatic backup — review the table above before applying.</span>
+              <div className="flex items-center gap-2 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                <Shield size={13} className="shrink-0"/>
+                <span>A full backup of the current data is saved to the audit log automatically before this runs, and every change is logged — so you can undo it later by restoring to a time just before now.</span>
               </div>
 
               <button onClick={applyRestore} disabled={phase==="applying"}
@@ -4523,7 +4552,8 @@ function AuditLogView({ currentUser }) {
 
   const actionColor = { UPDATE:"bg-blue-100 text-blue-700", CREATE:"bg-emerald-100 text-emerald-700",
     DELETE:"bg-rose-100 text-rose-700", LOGIN:"bg-indigo-100 text-indigo-700",
-    LOGOUT:"bg-slate-100 text-slate-600", AUTH:"bg-amber-100 text-amber-700" };
+    LOGOUT:"bg-slate-100 text-slate-600", AUTH:"bg-amber-100 text-amber-700",
+    RESTORE:"bg-amber-100 text-amber-700", BACKUP:"bg-purple-100 text-purple-700" };
 
   const entityColor = { COA:"bg-orange-100 text-orange-700", UNIT:"bg-teal-100 text-teal-700",
     HIRE:"bg-violet-100 text-violet-700", AUTH:"bg-slate-100 text-slate-600" };
