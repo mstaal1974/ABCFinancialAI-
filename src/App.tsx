@@ -9174,6 +9174,518 @@ Return ONLY a JSON array, no markdown, no backticks:
   );
 }
 
+// ─── ENROLMENT PLANNER (STUDENT GOAL-SEEK) ───────────────────────────────────
+// Reverse modelling: given a TARGET outcome, solve for the number of NEW STUDENTS
+// required, broken down by region × program × client segment, and check it against
+// trainer availability. Like the Scenario Lab, this never touches the live data —
+// it reads the committed baseline only as a reference point.
+const ENROLMENT_LS_KEY = "enrolment_plan_v1";
+
+// All program (course) codes seen across regions.
+const ALL_PROGRAMS = [...new Set(Object.values(UNIT_ASSUMPTIONS_FY26).flatMap(c => Object.keys(c)))];
+
+// Default client segments — editable. A "segment" captures how a class of client
+// buys: how many unit-enrolments an average student takes, and the share of leads
+// that convert to enrolment. (The CRM feed is monthly pipeline only, so segment
+// economics are modelled assumptions rather than per-client records.)
+const DEFAULT_SEGMENTS = [
+  { id: "seg-gov", name: "Government-funded", avgUnits: 1, conversion: 0.6 },
+  { id: "seg-corp", name: "Corporate / B2B", avgUnits: 2, conversion: 0.4 },
+  { id: "seg-ind", name: "Individual", avgUnits: 1, conversion: 0.3 },
+];
+
+// Average unit price for a region+program. program === "Blended" → average of the
+// region's sellable (price > 0) programs.
+function unitPriceFor(region, program) {
+  const courses = UNIT_ASSUMPTIONS_FY26[region];
+  if (!courses) return 0;
+  if (program && program !== "Blended") return courses[program]?.price || 0;
+  const prices = Object.values(courses).map(c => c.price).filter(p => p > 0);
+  return prices.length ? Math.round(prices.reduce((s, p) => s + p, 0) / prices.length) : 0;
+}
+
+// Programs sellable in a region (price > 0), plus the "Blended" pseudo-program.
+function programsForRegion(region) {
+  const courses = UNIT_ASSUMPTIONS_FY26[region] || {};
+  return ["Blended", ...Object.keys(courses).filter(c => (courses[c]?.price || 0) > 0)];
+}
+
+const ENROLMENT_HORIZONS = ["FY26", "FY27", "FY28", "All"];
+function monthsForHorizon(h) { return h === "All" ? MONTH_SCHEDULE.length : 12; }
+
+// Trainer delivery capacity (units) per trainer over a horizon.
+function trainerCapacityUnits(months, perMonth, useRamp) {
+  if (!useRamp) return perMonth * months;
+  // Ramp curve caps at 42/mo; scale to the configured perMonth ceiling.
+  const scale = perMonth / 42;
+  let total = 0;
+  for (let m = 0; m < months; m++) total += _getTrainerUnits(m) * scale;
+  return Math.round(total);
+}
+
+function EnrolmentPlanner({ baseData, currentUser }) {
+  const [target, setTarget] = useState({ metric: "addRevenue", value: 500000, horizon: "FY27" });
+  const [segments, setSegments] = useState(DEFAULT_SEGMENTS);
+  const [rows, setRows] = useState([]); // {id, region, program, segmentId, students}
+  const [capacity, setCapacity] = useState({ trainers: 2, perTrainerPerMonth: 42, useRamp: false });
+  const [solveTpl, setSolveTpl] = useState({ region: SCENARIO_REGIONS[0], program: "Blended", segmentId: "seg-gov" });
+  const [loaded, setLoaded] = useState(false);
+  // AI
+  const [aiPlan, setAiPlan] = useState(null);
+  const [planning, setPlanning] = useState(false);
+  const [aiErr, setAiErr] = useState("");
+
+  // ── Load / persist (localStorage primary, best-effort Supabase mirror) ────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let saved = null;
+      try {
+        const rowsR = await sbGet("enrolment_plans");
+        if (rowsR && Array.isArray(rowsR) && rowsR[0]?.data) {
+          saved = typeof rowsR[0].data === "string" ? JSON.parse(rowsR[0].data) : rowsR[0].data;
+        }
+      } catch { /* table may not exist — fall back to localStorage */ }
+      if (!saved) {
+        try { const raw = localStorage.getItem(ENROLMENT_LS_KEY); if (raw) saved = JSON.parse(raw); }
+        catch { /* ignore malformed cache */ }
+      }
+      if (cancelled) return;
+      if (saved) {
+        if (saved.target) setTarget(saved.target);
+        if (saved.segments) setSegments(saved.segments);
+        if (saved.rows) setRows(saved.rows);
+        if (saved.capacity) setCapacity(saved.capacity);
+      }
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Debounced persist whenever the plan changes.
+  useEffect(() => {
+    if (!loaded) return;
+    const payload = { target, segments, rows, capacity };
+    try { localStorage.setItem(ENROLMENT_LS_KEY, JSON.stringify(payload)); } catch { /* storage unavailable */ }
+    const t = setTimeout(() => {
+      sbUpsert("enrolment_plans", [{
+        id: `plan-${currentUser?.email || "shared"}`, data: JSON.stringify(payload),
+        user_email: currentUser?.email || "unknown", updated_at: new Date().toISOString(),
+      }]).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [target, segments, rows, capacity, loaded, currentUser]);
+
+  const months = monthsForHorizon(target.horizon);
+  const segById = (id) => segments.find(s => s.id === id) || segments[0];
+
+  // ── Baseline reference for the horizon ────────────────────────────────────────
+  const baseRef = useMemo(() => {
+    const inHz = (fy) => target.horizon === "All" || target.horizon === fy;
+    let revenue = 0, net = 0;
+    baseData.operationalFinancials.forEach(op => { if (inHz(op.fy)) { revenue += op.revenue; net += op.netCashflow; } });
+    return { revenue, net };
+  }, [baseData, target.horizon]);
+
+  // Additional revenue required to hit the target.
+  const requiredRevenue = useMemo(() => {
+    const v = Number(target.value) || 0;
+    if (target.metric === "addRevenue") return v;
+    if (target.metric === "totalRevenue") return Math.max(0, v - baseRef.revenue);
+    if (target.metric === "netCashflow") return Math.max(0, v - baseRef.net);
+    return v;
+  }, [target, baseRef]);
+
+  // ── Per-row + total computation ───────────────────────────────────────────────
+  const computed = useMemo(() => {
+    const list = rows.map(r => {
+      const price = unitPriceFor(r.region, r.program);
+      const seg = segById(r.segmentId);
+      const students = Number(r.students) || 0;
+      const units = students * (seg?.avgUnits || 1);
+      const revenue = units * price;
+      const leads = seg?.conversion > 0 ? Math.ceil(students / seg.conversion) : students;
+      return { ...r, price, segName: seg?.name || "—", units, revenue, leads };
+    });
+    const totals = list.reduce((a, r) => ({
+      students: a.students + r.students, units: a.units + r.units,
+      revenue: a.revenue + r.revenue, leads: a.leads + r.leads,
+    }), { students: 0, units: 0, revenue: 0, leads: 0 });
+    return { list, totals };
+  }, [rows, segments]);
+
+  const gap = requiredRevenue - computed.totals.revenue;
+
+  // ── Trainer capacity ──────────────────────────────────────────────────────────
+  const capCalc = useMemo(() => {
+    const perTrainer = trainerCapacityUnits(months, Number(capacity.perTrainerPerMonth) || 42, capacity.useRamp);
+    const maxUnits = perTrainer * (Number(capacity.trainers) || 0);
+    const usedUnits = computed.totals.units;
+    const utilisation = maxUnits > 0 ? usedUnits / maxUnits : (usedUnits > 0 ? Infinity : 0);
+    const shortfallUnits = Math.max(0, usedUnits - maxUnits);
+    const extraTrainers = perTrainer > 0 ? Math.ceil(shortfallUnits / perTrainer) : 0;
+    const extraCost = extraTrainers * getMonthlyCost("trainer") * months;
+    return { perTrainer, maxUnits, usedUnits, utilisation, shortfallUnits, extraTrainers, extraCost };
+  }, [months, capacity, computed.totals.units]);
+
+  const netImpact = computed.totals.revenue - capCalc.extraCost;
+
+  // ── Row + segment editors ─────────────────────────────────────────────────────
+  const addRow = (preset) => setRows(rs => [...rs, { id: Math.random().toString(36).slice(2, 7), region: SCENARIO_REGIONS[0], program: "Blended", segmentId: segments[0]?.id, students: 50, ...preset }]);
+  const editRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
+  const removeRow = (id) => setRows(rs => rs.filter(r => r.id !== id));
+  const editSeg = (id, patch) => setSegments(ss => ss.map(s => s.id === id ? { ...s, ...patch } : s));
+
+  // Goal-seek: solve students needed to close the remaining gap with a template.
+  const solveForGap = () => {
+    const price = unitPriceFor(solveTpl.region, solveTpl.program);
+    const seg = segById(solveTpl.segmentId);
+    const revPerStudent = price * (seg?.avgUnits || 1);
+    if (revPerStudent <= 0 || gap <= 0) return;
+    const students = Math.ceil(gap / revPerStudent);
+    addRow({ region: solveTpl.region, program: solveTpl.program, segmentId: solveTpl.segmentId, students });
+  };
+
+  // ── Sensitivity: students required to close the gap, per region (blended) ──────
+  const sensitivity = useMemo(() => {
+    const seg = segById(solveTpl.segmentId);
+    const need = Math.max(0, gap);
+    return SCENARIO_REGIONS.map(region => {
+      const price = unitPriceFor(region, "Blended");
+      const revPerStudent = price * (seg?.avgUnits || 1);
+      const students = revPerStudent > 0 ? Math.ceil(need / revPerStudent) : null;
+      return { region, price, students };
+    }).filter(r => r.price > 0).sort((a, b) => (a.students ?? 1e9) - (b.students ?? 1e9));
+  }, [gap, solveTpl.segmentId, segments]);
+
+  // ── AI: recommend an enrolment plan ───────────────────────────────────────────
+  const recommendPlan = async () => {
+    setPlanning(true); setAiErr(""); setAiPlan(null);
+    try {
+      const priceTable = SCENARIO_REGIONS.map(r => `${r}: blended $${unitPriceFor(r, "Blended")}/unit`).join("; ");
+      const prompt = `You are an enrolment strategist for ABC Training, an Australian RTO. Work out a realistic NEW-STUDENT acquisition plan to hit this target over ${target.horizon} (${months} months).
+
+TARGET: ${target.metric === "addRevenue" ? "additional revenue" : target.metric === "totalRevenue" ? "total revenue" : "net cashflow"} of $${Number(target.value).toLocaleString()}.
+Additional revenue still required from new students: $${Math.round(Math.max(0, gap)).toLocaleString()}.
+Baseline this horizon: revenue $${Math.round(baseRef.revenue).toLocaleString()}, net cashflow $${Math.round(baseRef.net).toLocaleString()}.
+Avg unit prices by region: ${priceTable}.
+Client segments (avg units/student, lead→enrolment conversion): ${segments.map(s => `${s.name} (${s.avgUnits}u, ${Math.round(s.conversion * 100)}%)`).join("; ")}.
+Trainer capacity: ${capacity.trainers} trainer(s) × ${capacity.perTrainerPerMonth} units/mo ≈ ${capCalc.maxUnits.toLocaleString()} units over the horizon. Each extra trainer costs ~$${Math.round(getMonthlyCost("trainer") * months).toLocaleString()}.
+
+Propose a mix of enrolment rows. Each row: region, program (use "Blended" unless a specific course is clearly better), segment (one of: ${segments.map(s => s.name).join(", ")}), and number of new students. Keep the plan within or just beyond current trainer capacity, and call out if extra trainers are needed.
+
+Return ONLY this, no markdown:
+ROWS
+region|program|segment|students
+QLD|Blended|Government-funded|120
+PLAN
+One short bullet per line on the recommended approach, sequencing, conversion levers and trainer implications.`;
+
+      const raw = await callGemini(prompt, "", 1536);
+      const result = { rows: [], notes: [] };
+      let section = "";
+      raw.split("\n").map(l => l.trim()).forEach(line => {
+        if (!line) return;
+        const up = line.toUpperCase();
+        if (up === "ROWS") return void (section = "rows");
+        if (up === "PLAN") return void (section = "plan");
+        if (section === "rows" && line.includes("|")) {
+          const p = line.split("|").map(x => x.trim());
+          if (p.length >= 4 && SCENARIO_REGIONS.includes(p[0])) {
+            const seg = segments.find(s => s.name.toLowerCase() === p[2].toLowerCase()) || segments[0];
+            const students = parseInt(p[3]) || 0;
+            if (students > 0) result.rows.push({ region: p[0], program: ALL_PROGRAMS.includes(p[1]) ? p[1] : "Blended", segmentId: seg.id, students });
+          }
+        } else if (section === "plan") {
+          result.notes.push(line.replace(/^[-*•]\s*/, ""));
+        }
+      });
+      if (result.rows.length === 0 && result.notes.length === 0) throw new Error("Could not parse plan");
+      setAiPlan(result);
+    } catch (e) {
+      setAiErr(e.message || "Plan generation failed — please try again.");
+    }
+    setPlanning(false);
+  };
+
+  const applyAiRows = (replace) => {
+    if (!aiPlan?.rows?.length) return;
+    const newRows = aiPlan.rows.map(r => ({ id: Math.random().toString(36).slice(2, 7), ...r }));
+    setRows(rs => replace ? newRows : [...rs, ...newRows]);
+  };
+
+  const inputCls = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-violet-400 outline-none bg-white";
+  const metricLabel = { addRevenue: "Additional revenue", totalRevenue: "Total revenue", netCashflow: "Net cashflow" };
+
+  if (!loaded) return (
+    <div className="py-20 text-center text-slate-400"><Loader2 size={28} className="mx-auto animate-spin text-violet-400" /><p className="text-sm mt-3">Loading planner…</p></div>
+  );
+
+  const gapClosed = gap <= 0;
+
+  return (
+    <div className="space-y-5 max-w-6xl">
+      {/* Non-destructive banner */}
+      <div className="flex items-center gap-2 bg-violet-50 border border-violet-100 rounded-xl px-4 py-2.5">
+        <Shield size={14} className="text-violet-500 shrink-0" />
+        <p className="text-[11px] text-violet-700">Work backwards from a target to the <span className="font-bold">new students required</span> — by region, program, client segment and trainer capacity. This is a sandbox and never changes your live data.</p>
+      </div>
+
+      {/* ── Target ────────────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+        <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Target size={14} className="text-violet-500" />What do you want to achieve?</p>
+        <div className="flex flex-wrap items-end gap-4">
+          <div>
+            <label className="block text-[10px] text-slate-400 font-semibold uppercase mb-1">Metric</label>
+            <select value={target.metric} onChange={e => setTarget(t => ({ ...t, metric: e.target.value }))} className={inputCls}>
+              <option value="addRevenue">Additional revenue</option>
+              <option value="totalRevenue">Total revenue (vs baseline)</option>
+              <option value="netCashflow">Net cashflow (vs baseline)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 font-semibold uppercase mb-1">Target ($)</label>
+            <input type="number" value={target.value} onChange={e => setTarget(t => ({ ...t, value: Number(e.target.value) || 0 }))} className={`${inputCls} w-36`} />
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 font-semibold uppercase mb-1">Horizon</label>
+            <select value={target.horizon} onChange={e => setTarget(t => ({ ...t, horizon: e.target.value }))} className={inputCls}>
+              {ENROLMENT_HORIZONS.map(h => <option key={h} value={h}>{h === "All" ? "All 3 years" : h}</option>)}
+            </select>
+          </div>
+          <div className="flex-1 min-w-[200px] text-right">
+            <p className="text-[10px] text-slate-400 uppercase font-semibold">Revenue required from new students</p>
+            <p className="text-2xl font-bold text-slate-800">{fmtAUD(requiredRevenue, false)}</p>
+            {target.metric !== "addRevenue" && <p className="text-[10px] text-slate-400">baseline {metricLabel[target.metric].toLowerCase()} {fmtAUD(target.metric === "netCashflow" ? baseRef.net : baseRef.revenue, true)}</p>}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Headline result ───────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-gradient-to-br from-violet-600 to-indigo-700 rounded-xl p-4 text-white shadow-sm">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-violet-200">New students in plan</p>
+          <p className="text-3xl font-black mt-1">{Math.round(computed.totals.students).toLocaleString()}</p>
+          <p className="text-[10px] text-violet-200 mt-0.5">{Math.round(computed.totals.units).toLocaleString()} units · {Math.round(computed.totals.leads).toLocaleString()} leads needed</p>
+        </div>
+        <ScenarioKpiCard title="Plan revenue" baseVal={requiredRevenue} scnVal={computed.totals.revenue} goodWhenUp />
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4">
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Gap to target</p>
+          <p className={`text-xl font-bold mt-1 ${gapClosed ? "text-emerald-600" : "text-rose-600"}`}>{gapClosed ? "Target met" : fmtAUD(gap, false)}</p>
+          <p className="text-[10px] text-slate-400 mt-0.5">{gapClosed ? `+${fmtAUD(-gap, true)} over target` : "still to fill"}</p>
+        </div>
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4">
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Trainer capacity</p>
+          <p className={`text-xl font-bold mt-1 ${capCalc.shortfallUnits > 0 ? "text-amber-600" : "text-emerald-600"}`}>{capCalc.maxUnits > 0 ? Math.round(capCalc.utilisation * 100) : "∞"}%</p>
+          <p className="text-[10px] text-slate-400 mt-0.5">{capCalc.shortfallUnits > 0 ? `+${capCalc.extraTrainers} trainer(s) · ${fmtAUD(capCalc.extraCost, true)}` : "within capacity"}</p>
+        </div>
+      </div>
+
+      {/* ── Enrolment mix ─────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+          <p className="text-sm font-bold text-slate-800 flex items-center gap-1.5"><Users size={15} className="text-violet-500" />Enrolment mix</p>
+          <button onClick={() => addRow()} className="text-[11px] text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1"><Plus size={12} />Add row</button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold">Region</th>
+                <th className="px-3 py-2 text-left font-semibold">Program</th>
+                <th className="px-3 py-2 text-left font-semibold">Client segment</th>
+                <th className="px-3 py-2 text-right font-semibold">Students</th>
+                <th className="px-3 py-2 text-right font-semibold">$/unit</th>
+                <th className="px-3 py-2 text-right font-semibold">Units</th>
+                <th className="px-3 py-2 text-right font-semibold">Leads</th>
+                <th className="px-3 py-2 text-right font-semibold">Revenue</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {computed.list.length === 0 && (
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-slate-400">No rows yet. Add one, or use “Solve for gap” / AI below.</td></tr>
+              )}
+              {computed.list.map(r => (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <td className="px-3 py-1.5">
+                    <select value={r.region} onChange={e => editRow(r.id, { region: e.target.value, program: "Blended" })} className={inputCls}>
+                      {SCENARIO_REGIONS.map(rg => <option key={rg} value={rg}>{rg}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <select value={r.program} onChange={e => editRow(r.id, { program: e.target.value })} className={inputCls}>
+                      {programsForRegion(r.region).map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <select value={r.segmentId} onChange={e => editRow(r.id, { segmentId: e.target.value })} className={inputCls}>
+                      {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-3 py-1.5 text-right">
+                    <input type="number" min="0" value={r.students} onChange={e => editRow(r.id, { students: Number(e.target.value) || 0 })} className={`${inputCls} w-20 text-right`} />
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-slate-500">${r.price}</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-slate-600">{Math.round(r.units).toLocaleString()}</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-slate-400">{r.leads.toLocaleString()}</td>
+                  <td className="px-3 py-1.5 text-right font-mono font-bold text-emerald-600">{fmtAUD(r.revenue, false)}</td>
+                  <td className="px-3 py-1.5 text-right"><button onClick={() => removeRow(r.id)} className="text-slate-300 hover:text-rose-500"><X size={13} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+            {computed.list.length > 0 && (
+              <tfoot>
+                <tr className="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-700">
+                  <td className="px-3 py-2" colSpan={3}>Total</td>
+                  <td className="px-3 py-2 text-right">{Math.round(computed.totals.students).toLocaleString()}</td>
+                  <td></td>
+                  <td className="px-3 py-2 text-right">{Math.round(computed.totals.units).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right text-slate-400">{computed.totals.leads.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right text-emerald-700">{fmtAUD(computed.totals.revenue, false)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+
+        {/* Solve-for-gap */}
+        <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-semibold text-slate-600 flex items-center gap-1"><Target size={12} className="text-violet-500" />Solve for gap:</span>
+          <select value={solveTpl.region} onChange={e => setSolveTpl(t => ({ ...t, region: e.target.value, program: "Blended" }))} className={inputCls}>
+            {SCENARIO_REGIONS.map(rg => <option key={rg} value={rg}>{rg}</option>)}
+          </select>
+          <select value={solveTpl.program} onChange={e => setSolveTpl(t => ({ ...t, program: e.target.value }))} className={inputCls}>
+            {programsForRegion(solveTpl.region).map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <select value={solveTpl.segmentId} onChange={e => setSolveTpl(t => ({ ...t, segmentId: e.target.value }))} className={inputCls}>
+            {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <button onClick={solveForGap} disabled={gapClosed} className="bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1">
+            <Plus size={12} />{gapClosed ? "Target met" : `Add ${(() => { const p = unitPriceFor(solveTpl.region, solveTpl.program) * (segById(solveTpl.segmentId)?.avgUnits || 1); return p > 0 ? Math.ceil(Math.max(0, gap) / p).toLocaleString() : "—"; })()} students`}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Capacity + segments ───────────────────────────────────────────────── */}
+      <div className="grid lg:grid-cols-2 gap-5">
+        {/* Trainer availability */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Activity size={14} className="text-blue-500" />Trainer availability</p>
+          <div className="flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-[10px] text-slate-400 font-semibold uppercase mb-1">Trainers available</label>
+              <input type="number" min="0" value={capacity.trainers} onChange={e => setCapacity(c => ({ ...c, trainers: Number(e.target.value) || 0 }))} className={`${inputCls} w-20`} />
+            </div>
+            <div>
+              <label className="block text-[10px] text-slate-400 font-semibold uppercase mb-1">Units / trainer / mo</label>
+              <input type="number" min="1" value={capacity.perTrainerPerMonth} onChange={e => setCapacity(c => ({ ...c, perTrainerPerMonth: Number(e.target.value) || 1 }))} className={`${inputCls} w-20`} />
+            </div>
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 pb-2">
+              <input type="checkbox" checked={capacity.useRamp} onChange={e => setCapacity(c => ({ ...c, useRamp: e.target.checked }))} />
+              Apply ramp-up curve
+            </label>
+          </div>
+          <div className="mt-4 space-y-1.5 text-xs">
+            <div className="flex justify-between"><span className="text-slate-500">Deliverable capacity ({months} mo)</span><span className="font-mono font-semibold text-slate-700">{capCalc.maxUnits.toLocaleString()} units</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Units in plan</span><span className="font-mono font-semibold text-slate-700">{Math.round(capCalc.usedUnits).toLocaleString()} units</span></div>
+            <div className="h-2 rounded-full bg-slate-100 overflow-hidden mt-1">
+              <div className={`h-full ${capCalc.shortfallUnits > 0 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.min(100, (capCalc.utilisation || 0) * 100)}%` }} />
+            </div>
+            {capCalc.shortfallUnits > 0 ? (
+              <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 mt-2">
+                Over capacity by {Math.round(capCalc.shortfallUnits).toLocaleString()} units → needs <b>{capCalc.extraTrainers} more trainer(s)</b> (~{fmtAUD(capCalc.extraCost, true)}). Net of that cost: <b>{fmtAUD(netImpact, false)}</b>.
+              </p>
+            ) : (
+              <p className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2.5 py-1.5 mt-2">Plan fits within current trainer capacity.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Client segments */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Tag size={14} className="text-emerald-500" />Client segment assumptions</p>
+          <div className="space-y-2">
+            <div className="grid grid-cols-[1fr_70px_70px] gap-2 text-[10px] text-slate-400 font-semibold uppercase px-1">
+              <span>Segment</span><span className="text-center">Units/student</span><span className="text-center">Conversion</span>
+            </div>
+            {segments.map(s => (
+              <div key={s.id} className="grid grid-cols-[1fr_70px_70px] gap-2 items-center">
+                <input value={s.name} onChange={e => editSeg(s.id, { name: e.target.value })} className={inputCls} />
+                <input type="number" min="0" step="0.5" value={s.avgUnits} onChange={e => editSeg(s.id, { avgUnits: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
+                <input type="number" min="0" max="1" step="0.05" value={s.conversion} onChange={e => editSeg(s.id, { conversion: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-2">Conversion = share of leads that enrol. Leads needed = students ÷ conversion.</p>
+        </div>
+      </div>
+
+      {/* ── Sensitivity ───────────────────────────────────────────────────────── */}
+      {!gapClosed && sensitivity.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Scale size={14} className="text-violet-500" />Students needed to close the gap by region <span className="font-normal text-slate-400">(blended program · {segById(solveTpl.segmentId)?.name})</span></p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {sensitivity.map(s => (
+              <button key={s.region} onClick={() => { setSolveTpl(t => ({ ...t, region: s.region, program: "Blended" })); }}
+                className="text-left border border-slate-200 rounded-lg p-2.5 hover:border-violet-300 hover:bg-violet-50 transition-colors">
+                <p className="text-[10px] text-slate-400 font-semibold">{s.region} · ${s.price}/unit</p>
+                <p className="text-lg font-bold text-slate-800">{s.students?.toLocaleString() ?? "—"}</p>
+                <p className="text-[10px] text-slate-400">students</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── AI recommend ──────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center"><Sparkles size={14} className="text-white" /></div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">AI enrolment plan</h3>
+              <p className="text-[10px] text-slate-400">Gemini proposes a region/program/segment mix to hit your target</p>
+            </div>
+          </div>
+          <button onClick={recommendPlan} disabled={planning} className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors">
+            {planning ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            {planning ? "Planning…" : aiPlan ? "Re-plan" : "Recommend plan"}
+          </button>
+        </div>
+        {aiPlan && (
+          <div className="p-5 space-y-4">
+            {aiPlan.rows.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-bold text-slate-700">Proposed mix</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => applyAiRows(false)} className="text-[11px] bg-violet-100 hover:bg-violet-200 text-violet-700 px-2.5 py-1 rounded-lg font-semibold flex items-center gap-1"><Plus size={11} />Add to plan</button>
+                    <button onClick={() => applyAiRows(true)} className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 px-2.5 py-1 rounded-lg font-semibold">Replace plan</button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {aiPlan.rows.map((r, i) => (
+                    <span key={i} className="text-[10px] bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full">{r.students} × {r.region} {r.program} · {segById(r.segmentId)?.name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {aiPlan.notes.length > 0 && (
+              <ul className="space-y-1">
+                {aiPlan.notes.map((n, i) => <li key={i} className="flex items-start gap-2 text-xs text-slate-600"><ChevronRight size={12} className="shrink-0 mt-0.5 text-slate-300" />{n}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      {aiErr && <p className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">{aiErr}</p>}
+    </div>
+  );
+}
+
 // ─── LAYOUT ───────────────────────────────────────────────────────────────────
 const NAV = [
   {id:"dashboard", label:"Overview",      icon:LayoutDashboard, group:"Analytics"},
@@ -9185,6 +9697,7 @@ const NAV = [
   {id:"staffing",  label:"Staffing",      icon:Users,           group:"Planning"},
   {id:"staff",     label:"Staff Planner", icon:Users,           group:"Planning"},
   {id:"scenarios", label:"Scenario Lab",  icon:FlaskConical,    group:"Planning"},
+  {id:"enrolment", label:"Enrolment Planner", icon:Target,      group:"Planning"},
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
   {id:"data",      label:"Raw Data",      icon:Table,           group:"Source"},
   {id:"calc-audit", label:"Calc Audit",    icon:Shield,          group:"Admin"},
@@ -9829,6 +10342,7 @@ export default function App() {
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
       {activeTab==="scenarios" && <ScenarioLab base={scenarioBase} baseData={data} currentUser={currentUser}/>}
+      {activeTab==="enrolment" && <EnrolmentPlanner baseData={data} currentUser={currentUser}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}

@@ -25,3 +25,24 @@ create policy "scenarios_authenticated_all"
   to authenticated
   using (true)
   with check (true);
+
+-- ── Enrolment Planner (Student Goal-Seek) ────────────────────────────────────
+-- Stores the saved enrolment plan (target, mix rows, client segments, capacity).
+-- One row per user (id = 'plan-<email>'). Also optional — falls back to
+-- localStorage when absent.
+create table if not exists public.enrolment_plans (
+  id          text primary key,
+  data        text not null,            -- full plan JSON
+  user_email  text,
+  updated_at  timestamptz not null default now()
+);
+
+alter table public.enrolment_plans enable row level security;
+
+drop policy if exists "enrolment_plans_authenticated_all" on public.enrolment_plans;
+create policy "enrolment_plans_authenticated_all"
+  on public.enrolment_plans
+  for all
+  to authenticated
+  using (true)
+  with check (true);
