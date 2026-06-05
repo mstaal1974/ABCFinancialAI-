@@ -10,7 +10,7 @@ import {
   Save, X, Tag, AlertTriangle, RefreshCw, ChevronDown, Database, Upload, BarChart2,
   LogOut, Lock, Eye, EyeOff, Shield, ClipboardList, UserCircle, KeyRound,
   Bell, BellRing, FileText, TrendingUp as TrendUp, Zap, ChevronRight, CheckCircle, XCircle, Clock,
-  RotateCcw, History
+  RotateCcw, History, FlaskConical, Sparkles, Lightbulb, Copy, SlidersHorizontal, Scale
 } from "lucide-react";
 
 // ─── SUPABASE CONFIG & AUTH ──────────────────────────────────────────────────
@@ -8526,6 +8526,654 @@ function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroA
   );
 }
 
+// ─── SCENARIO LAB ─────────────────────────────────────────────────────────────
+// A scenario is a NON-DESTRUCTIVE overlay: a set of "levers" that get translated
+// into buildBaselineData() inputs at compute time. Because buildBaselineData is a
+// pure function, computing a scenario never mutates the committed "true position".
+// Scenarios persist to localStorage and best-effort sync to a Supabase `scenarios`
+// table (see db/scenarios.sql). If the table doesn't exist yet, sync silently
+// degrades to localStorage-only — the feature still works.
+const SCENARIO_LS_KEY = "scenarios_v1";
+const SCENARIO_FY_LIST = ["FY26", "FY27", "FY28"];
+const SCENARIO_STAFF_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
+// Cost-cut targets exclude staffing rows (those are driven by the Wage/Staffing levers,
+// not COA overrides, so a % cut applied via COA would be silently ignored for them).
+const SCENARIO_COST_TARGETS = (() => {
+  const accounts = CHART_OF_ACCOUNTS.filter(ac => !SCENARIO_STAFF_ROWS.has(ac.account)).map(ac => ac.account);
+  return ["All Costs", "Direct Costs", "Overheads", ...[...new Set(accounts)]];
+})();
+const SCENARIO_REGIONS = Object.keys(UNIT_ASSUMPTIONS_FY26);
+
+function makeScenario(name) {
+  return {
+    id: `scn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: name || "Untitled scenario",
+    notes: "",
+    createdAt: new Date().toISOString(),
+    levers: { costCuts: [], unitUplift: [], hires: [], wage: null, cpi: null },
+  };
+}
+
+// Effective baseline unit count for a cell, mirroring buildBaselineData's formula.
+function scenarioBaselineUnits(region, code, mk, fy, label, adjustments) {
+  const adjKey = `${region}|${code}|${label}`;
+  if (adjustments[adjKey] !== undefined) return adjustments[adjKey];
+  const base = UNIT_ASSUMPTIONS_FY26[region]?.[code]?.monthly?.[mk] || 0;
+  const growth = UNIT_GROWTH[fy] || 1;
+  return Math.round(base * growth * 10) / 10;
+}
+
+// Translate a scenario's levers into buildBaselineData() inputs layered over the
+// committed baseline, then run the same engine. Returns the scenario's `data`.
+function computeScenarioData(scenario, base) {
+  const lv = scenario?.levers || {};
+
+  // 1. Cost cuts → COA overrides on forecast months (FY26 actuals stay untouched,
+  //    since buildBaselineData uses real actuals there and ignores COA overrides).
+  const coa = { ...(base.coaAdjustments || {}) };
+  (lv.costCuts || []).forEach(cut => {
+    const pct = Number(cut.pct) || 0;
+    if (!pct) return;
+    const factor = 1 - pct / 100;
+    const accts = CHART_OF_ACCOUNTS.filter(ac => {
+      if (SCENARIO_STAFF_ROWS.has(ac.account)) return false;
+      if (cut.target === "All Costs") return true;
+      if (cut.target === "Direct Costs" || cut.target === "Overheads") return ac.section === cut.target;
+      return ac.account === cut.target;
+    });
+    MONTH_SCHEDULE.forEach(({ mk, fy }) => {
+      if (cut.fy && cut.fy !== "All" && cut.fy !== fy) return;
+      accts.forEach(ac => {
+        const key = `${fy}|${ac.account}|${mk}`;
+        const inflation = COST_INFLATION[fy] || 1;
+        const current = coa[key] !== undefined ? coa[key] : Math.round((ac.months[mk] || 0) * inflation);
+        coa[key] = Math.max(0, Math.round(current * factor));
+      });
+    });
+  });
+
+  // 2. Unit uplift → unit-adjustment overrides (models new programs / extra volume).
+  const units = { ...(base.unitAdjustments || {}) };
+  (lv.unitUplift || []).forEach(up => {
+    const pct = Number(up.pct) || 0;
+    if (!pct) return;
+    const factor = 1 + pct / 100;
+    Object.entries(UNIT_ASSUMPTIONS_FY26).forEach(([region, courses]) => {
+      if (up.region && up.region !== "All" && up.region !== region) return;
+      Object.keys(courses).forEach(code => {
+        MONTH_SCHEDULE.forEach(({ mk, fy, label }) => {
+          const cur = scenarioBaselineUnits(region, code, mk, fy, label, units);
+          if (!cur) return; // don't conjure volume into courses with no baseline activity
+          units[`${region}|${code}|${label}`] = Math.round(cur * factor * 10) / 10;
+        });
+      });
+    });
+  });
+
+  // 3. Extra hires / departures → treated as "filled" within the scenario only.
+  const hires = [
+    ...(base.filledHires || []),
+    ...((lv.hires || []).map(h => ({ ...h, filled: true }))),
+  ];
+
+  // 4. Wage / CPI assumption overrides (fall back to committed when not set).
+  const wage = lv.wage || base.appliedWage || {};
+  const cpi = lv.cpi || base.appliedCpi || {};
+
+  return buildBaselineData(units, hires, coa, base.peopleOverrides || {}, wage, cpi, base.xeroActuals);
+}
+
+// Aggregate KPIs for a horizon ("All" or an FY label).
+function scenarioKpis(data, horizon) {
+  const inHz = (fy) => horizon === "All" || horizon === fy;
+  let revenue = 0, costs = 0, net = 0, endBal = 0;
+  data.operationalFinancials.forEach(op => {
+    if (!inHz(op.fy)) return;
+    revenue += op.revenue; costs += op.payments; net += op.netCashflow; endBal = op.closingBalance;
+  });
+  return { revenue, costs, net, endBal };
+}
+
+function leverCount(scenario) {
+  const lv = scenario?.levers || {};
+  return (lv.costCuts?.length || 0) + (lv.unitUplift?.length || 0) + (lv.hires?.length || 0)
+    + (lv.wage ? 1 : 0) + (lv.cpi ? 1 : 0);
+}
+
+// Small comparison KPI card: baseline → scenario with a coloured delta.
+function ScenarioKpiCard({ title, baseVal, scnVal, goodWhenUp = true }) {
+  const delta = scnVal - baseVal;
+  const pct = baseVal !== 0 ? (delta / Math.abs(baseVal)) * 100 : 0;
+  const improved = goodWhenUp ? delta > 0 : delta < 0;
+  const neutral = Math.abs(delta) < 1;
+  const color = neutral ? "text-slate-400" : improved ? "text-emerald-600" : "text-rose-600";
+  const Icon = neutral ? null : (delta > 0 ? TrendingUp : TrendingDown);
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4">
+      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{title}</p>
+      <p className="text-xl font-bold text-slate-800 mt-1">{fmtAUD(scnVal, false)}</p>
+      <div className="flex items-center justify-between mt-1.5">
+        <span className="text-[10px] text-slate-400">Base {fmtAUD(baseVal, true)}</span>
+        <span className={`text-[11px] font-bold flex items-center gap-0.5 ${color}`}>
+          {Icon && <Icon size={11} />}
+          {delta >= 0 ? "+" : ""}{fmtAUD(delta, true)} ({pct >= 0 ? "+" : ""}{pct.toFixed(1)}%)
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ScenarioLab({ base, baseData, currentUser }) {
+  const [scenarios, setScenarios] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [horizon, setHorizon] = useState("All");
+  const [loaded, setLoaded] = useState(false);
+  // AI state
+  const [analysis, setAnalysis] = useState(null);
+  const [analysing, setAnalysing] = useState(false);
+  const [goal, setGoal] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggesting, setSuggesting] = useState(false);
+  const [aiError, setAiError] = useState("");
+
+  const active = scenarios.find(s => s.id === activeId) || null;
+
+  // ── Load (Supabase → localStorage fallback) ──────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let loadedScenarios = [];
+      try {
+        const rows = await sbGet("scenarios");
+        if (rows && Array.isArray(rows)) {
+          loadedScenarios = rows.map(r => {
+            try { return typeof r.data === "string" ? JSON.parse(r.data) : r.data; }
+            catch { return null; }
+          }).filter(Boolean);
+        }
+      } catch { /* table may not exist yet — fall through to localStorage */ }
+      if (loadedScenarios.length === 0) {
+        try {
+          const raw = localStorage.getItem(SCENARIO_LS_KEY);
+          if (raw) loadedScenarios = JSON.parse(raw);
+        } catch { /* ignore malformed cache */ }
+      }
+      if (cancelled) return;
+      setScenarios(loadedScenarios);
+      setActiveId(loadedScenarios[0]?.id || null);
+      setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Persist every change to localStorage immediately (source of truth for this browser).
+  const persistLocal = (list) => {
+    try { localStorage.setItem(SCENARIO_LS_KEY, JSON.stringify(list)); } catch { /* storage full / unavailable */ }
+  };
+
+  const upsertRemote = (scn) => {
+    sbUpsert("scenarios", [{
+      id: scn.id, name: scn.name, data: JSON.stringify(scn),
+      user_email: currentUser?.email || "unknown", updated_at: new Date().toISOString(),
+    }]).catch(() => {});
+  };
+
+  const commitScenario = (scn, auditAction) => {
+    setScenarios(prev => {
+      const exists = prev.some(s => s.id === scn.id);
+      const next = exists ? prev.map(s => s.id === scn.id ? scn : s) : [...prev, scn];
+      persistLocal(next);
+      return next;
+    });
+    upsertRemote(scn);
+    if (auditAction) sbAudit(currentUser, auditAction, "SCENARIO", scn.name);
+  };
+
+  const updateActive = (mutator) => {
+    if (!active) return;
+    const next = { ...active, levers: { ...active.levers }, ...mutator(active) };
+    commitScenario(next);
+  };
+
+  const setLevers = (patch) => updateActive(s => ({ levers: { ...s.levers, ...patch } }));
+
+  const createScenario = (preset) => {
+    const scn = preset || makeScenario(`Scenario ${scenarios.length + 1}`);
+    commitScenario(scn, "CREATE");
+    setActiveId(scn.id);
+    setAnalysis(null);
+  };
+
+  const duplicateScenario = (s) => {
+    const copy = { ...JSON.parse(JSON.stringify(s)), id: makeScenario().id, name: `${s.name} (copy)`, createdAt: new Date().toISOString() };
+    commitScenario(copy, "CREATE");
+    setActiveId(copy.id);
+  };
+
+  const deleteScenario = (s) => {
+    if (!confirm(`Delete scenario "${s.name}"? This does not affect your live data.`)) return;
+    setScenarios(prev => {
+      const next = prev.filter(x => x.id !== s.id);
+      persistLocal(next);
+      if (s.id === activeId) setActiveId(next[0]?.id || null);
+      return next;
+    });
+    sbDelete("scenarios", { id: s.id }).catch(() => {});
+    sbAudit(currentUser, "DELETE", "SCENARIO", s.name);
+  };
+
+  // ── Scenario vs baseline computation (memoised) ───────────────────────────────
+  const scnData = useMemo(() => active ? computeScenarioData(active, base) : null, [active, base]);
+  const baseK = useMemo(() => scenarioKpis(baseData, horizon), [baseData, horizon]);
+  const scnK = useMemo(() => scnData ? scenarioKpis(scnData, horizon) : null, [scnData, horizon]);
+
+  const chartData = useMemo(() => {
+    if (!scnData) return [];
+    const inHz = (fy) => horizon === "All" || horizon === fy;
+    return baseData.operationalFinancials
+      .map((op, i) => inHz(op.fy) ? {
+        month: op.month,
+        Baseline: Math.round(op.closingBalance),
+        Scenario: Math.round(scnData.operationalFinancials[i]?.closingBalance || 0),
+      } : null)
+      .filter(Boolean);
+  }, [scnData, baseData, horizon]);
+
+  // ── AI: analyse the active scenario ───────────────────────────────────────────
+  const analyseScenario = async () => {
+    if (!active || !scnK) return;
+    setAnalysing(true); setAiError(""); setAnalysis(null);
+    try {
+      const lv = active.levers;
+      const leverLines = [
+        ...(lv.costCuts || []).map(c => `Cut ${c.target} by ${c.pct}% (${c.fy})`),
+        ...(lv.unitUplift || []).map(u => `Increase program volume ${u.region === "All" ? "across all regions" : "in " + u.region} by ${u.pct}%`),
+        ...(lv.hires || []).map(h => `${h.eventType === "departure" ? "Remove" : "Add"} ${h.count}× ${STAFF_ROLES.find(r => r.id === h.roleId)?.label || h.roleId} in ${h.region} from ${h.startMonth}`),
+        lv.wage ? `Wage growth set to FY26 ${lv.wage.fy26}% / FY27 ${lv.wage.fy27}% / FY28 ${lv.wage.fy28}%` : null,
+        lv.cpi ? `CPI set to FY26 ${lv.cpi.fy26}% / FY27 ${lv.cpi.fy27}% / FY28 ${lv.cpi.fy28}%` : null,
+      ].filter(Boolean);
+
+      const prompt = `You are a CFO advisor for ABC Training, an Australian RTO. Analyse this WHAT-IF scenario against the current committed plan ("baseline"). Horizon: ${horizon}.
+
+SCENARIO LEVERS:
+${leverLines.length ? leverLines.map(l => "- " + l).join("\n") : "- (no levers configured yet)"}
+
+FINANCIAL IMPACT (${horizon}):
+- Revenue: baseline $${Math.round(baseK.revenue).toLocaleString()} → scenario $${Math.round(scnK.revenue).toLocaleString()} (${(scnK.revenue - baseK.revenue >= 0 ? "+" : "")}$${Math.round(scnK.revenue - baseK.revenue).toLocaleString()})
+- Total costs: baseline $${Math.round(baseK.costs).toLocaleString()} → scenario $${Math.round(scnK.costs).toLocaleString()} (${(scnK.costs - baseK.costs >= 0 ? "+" : "")}$${Math.round(scnK.costs - baseK.costs).toLocaleString()})
+- Net cashflow: baseline $${Math.round(baseK.net).toLocaleString()} → scenario $${Math.round(scnK.net).toLocaleString()} (${(scnK.net - baseK.net >= 0 ? "+" : "")}$${Math.round(scnK.net - baseK.net).toLocaleString()})
+- Ending cash: baseline $${Math.round(baseK.endBal).toLocaleString()} → scenario $${Math.round(scnK.endBal).toLocaleString()} (${(scnK.endBal - baseK.endBal >= 0 ? "+" : "")}$${Math.round(scnK.endBal - baseK.endBal).toLocaleString()})
+
+Reply in EXACTLY this format. No other text, no markdown symbols.
+
+SUMMARY
+Two or three sentences on the net effect and whether this scenario is worth pursuing.
+IMPACTS
+One short bullet per material financial impact.
+RISKS
+One short bullet per key risk or assumption that should be validated.
+RECOMMENDATIONS
+One short bullet per concrete next step.`;
+
+      const raw = await callGemini(prompt, "", 1536);
+      const result = { summary: "", impacts: [], risks: [], recommendations: [] };
+      let section = "";
+      raw.split("\n").map(l => l.trim()).forEach(line => {
+        if (!line) return;
+        const up = line.toUpperCase();
+        if (up === "SUMMARY") return void (section = "summary");
+        if (up === "IMPACTS") return void (section = "impacts");
+        if (up === "RISKS") return void (section = "risks");
+        if (up === "RECOMMENDATIONS") return void (section = "recommendations");
+        const clean = line.replace(/^[-*•]\s*/, "");
+        if (section === "summary") result.summary += (result.summary ? " " : "") + clean;
+        else if (section) result[section].push(clean);
+      });
+      if (!result.summary && result.impacts.length === 0) throw new Error("Could not parse analysis");
+      setAnalysis(result);
+    } catch (e) {
+      setAiError(e.message || "Analysis failed — please try again.");
+    }
+    setAnalysing(false);
+  };
+
+  // ── AI: suggest scenarios from a goal ─────────────────────────────────────────
+  const suggestScenarios = async () => {
+    setSuggesting(true); setAiError(""); setSuggestions([]);
+    try {
+      const prompt = `You are a CFO advisor for ABC Training, an Australian RTO. Propose 3 distinct what-if scenarios to achieve this goal:
+
+GOAL: ${goal || "Improve net cashflow without harming growth"}
+
+Current baseline (All years): revenue $${Math.round(baseK.revenue).toLocaleString()}, total costs $${Math.round(baseK.costs).toLocaleString()}, net cashflow $${Math.round(baseK.net).toLocaleString()}, ending cash $${Math.round(baseK.endBal).toLocaleString()}.
+
+Each scenario is built ONLY from these levers:
+- costCuts: array of { "target": one of [${SCENARIO_COST_TARGETS.map(t => `"${t}"`).join(", ")}], "fy": one of ["All","FY26","FY27","FY28"], "pct": number 1-40 }
+- unitUplift: array of { "region": one of ["All", ${SCENARIO_REGIONS.map(r => `"${r}"`).join(", ")}], "pct": number 1-30 }
+- hires: array of { "roleId": one of [${STAFF_ROLES.map(r => `"${r.id}"`).join(", ")}], "count": 1-3, "startMonth": one of ["Jul-26","Jan-27","Jul-27"], "region": one of [${SCENARIO_REGIONS.map(r => `"${r}"`).join(", ")}], "eventType": "hire" or "departure" }
+
+Return ONLY a JSON array, no markdown, no backticks:
+[{"name":"Lean Overheads","rationale":"one sentence","levers":{"costCuts":[{"target":"Overheads","fy":"All","pct":10}],"unitUplift":[],"hires":[]}}]`;
+
+      const raw = await callGemini(prompt, "", 2048);
+      let parsed = [];
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (match) {
+        const cleaned = match[0].replace(/,\s*([}\]])/g, "$1");
+        parsed = JSON.parse(cleaned);
+      }
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("Could not parse suggestions");
+      setSuggestions(parsed);
+    } catch (e) {
+      setAiError(e.message || "Suggestion failed — please try again.");
+    }
+    setSuggesting(false);
+  };
+
+  const applySuggestion = (sug) => {
+    const lv = sug.levers || {};
+    const scn = makeScenario(sug.name || "AI scenario");
+    scn.notes = sug.rationale || "";
+    scn.levers = {
+      costCuts: (lv.costCuts || []).map(c => ({ id: Math.random().toString(36).slice(2, 7), target: c.target, fy: c.fy || "All", pct: Number(c.pct) || 0 })),
+      unitUplift: (lv.unitUplift || []).map(u => ({ id: Math.random().toString(36).slice(2, 7), region: u.region || "All", pct: Number(u.pct) || 0 })),
+      hires: (lv.hires || []).map(h => ({ id: Math.random().toString(36).slice(2, 7), roleId: h.roleId || "trainer", count: Number(h.count) || 1, startMonth: h.startMonth || ALL_MONTH_LABELS[12], region: h.region || SCENARIO_REGIONS[0], eventType: h.eventType === "departure" ? "departure" : "hire" })),
+      wage: lv.wage || null,
+      cpi: lv.cpi || null,
+    };
+    createScenario(scn);
+    setSuggestions([]);
+  };
+
+  // ── Lever editors ─────────────────────────────────────────────────────────────
+  const addCostCut = () => setLevers({ costCuts: [...(active.levers.costCuts || []), { id: Math.random().toString(36).slice(2, 7), target: "Overheads", fy: "All", pct: 10 }] });
+  const addUplift = () => setLevers({ unitUplift: [...(active.levers.unitUplift || []), { id: Math.random().toString(36).slice(2, 7), region: "All", pct: 5 }] });
+  const addHire = () => setLevers({ hires: [...(active.levers.hires || []), { id: Math.random().toString(36).slice(2, 7), roleId: "trainer", count: 1, startMonth: ALL_MONTH_LABELS[12], region: SCENARIO_REGIONS[0], eventType: "hire" }] });
+  const editLeverRow = (key, id, patch) => setLevers({ [key]: active.levers[key].map(r => r.id === id ? { ...r, ...patch } : r) });
+  const removeLeverRow = (key, id) => setLevers({ [key]: active.levers[key].filter(r => r.id !== id) });
+
+  const inputCls = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-violet-400 outline-none bg-white";
+
+  if (!loaded) return (
+    <div className="py-20 text-center text-slate-400"><Loader2 size={28} className="mx-auto animate-spin text-violet-400" /><p className="text-sm mt-3">Loading scenarios…</p></div>
+  );
+
+  return (
+    <div className="flex gap-5">
+      {/* ── Scenario list ─────────────────────────────────────────────────────── */}
+      <aside className="w-56 shrink-0 space-y-2">
+        <button onClick={() => createScenario()} className="w-full flex items-center justify-center gap-1.5 bg-violet-600 hover:bg-violet-700 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors">
+          <Plus size={14} /> New scenario
+        </button>
+        {scenarios.length === 0 && <p className="text-[11px] text-slate-400 px-1 pt-2">No scenarios yet. Create one to start modelling.</p>}
+        {scenarios.map(s => (
+          <div key={s.id} onClick={() => { setActiveId(s.id); setAnalysis(null); }}
+            className={`group p-3 rounded-xl border cursor-pointer transition-all ${s.id === activeId ? "bg-violet-50 border-violet-300 shadow-sm" : "bg-white border-slate-200 hover:border-slate-300"}`}>
+            <div className="flex items-start justify-between gap-1">
+              <p className="text-xs font-bold text-slate-800 truncate">{s.name}</p>
+              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                <button onClick={e => { e.stopPropagation(); duplicateScenario(s); }} title="Duplicate" className="text-slate-400 hover:text-violet-600"><Copy size={12} /></button>
+                <button onClick={e => { e.stopPropagation(); deleteScenario(s); }} title="Delete" className="text-slate-400 hover:text-rose-600"><Trash2 size={12} /></button>
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400 mt-0.5">{leverCount(s)} lever{leverCount(s) === 1 ? "" : "s"}</p>
+          </div>
+        ))}
+      </aside>
+
+      {/* ── Active scenario workspace ─────────────────────────────────────────── */}
+      <div className="flex-1 min-w-0 space-y-5">
+        {/* Non-destructive banner */}
+        <div className="flex items-center gap-2 bg-violet-50 border border-violet-100 rounded-xl px-4 py-2.5">
+          <Shield size={14} className="text-violet-500 shrink-0" />
+          <p className="text-[11px] text-violet-700">Scenario Lab is a sandbox — modelling here <span className="font-bold">never changes your live data or true position</span>. Everything compares against the committed baseline.</p>
+        </div>
+
+        {!active ? (
+          <div className="bg-white rounded-xl border border-slate-100 shadow-sm py-16 text-center text-slate-400">
+            <FlaskConical size={32} className="mx-auto mb-3 opacity-30" />
+            <p className="text-sm font-medium">Create a scenario to begin</p>
+            <p className="text-xs mt-1">Model cost cuts, new programs, hiring changes and assumptions — risk-free.</p>
+          </div>
+        ) : (
+          <>
+            {/* Header: name + horizon */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 flex flex-wrap items-center gap-3">
+              <input value={active.name} onChange={e => updateActive(() => ({ name: e.target.value }))}
+                className="flex-1 min-w-[180px] text-base font-bold text-slate-800 border-b-2 border-transparent focus:border-violet-300 outline-none" />
+              <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                {["All", ...SCENARIO_FY_LIST].map(h => (
+                  <button key={h} onClick={() => setHorizon(h)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all ${horizon === h ? "bg-white text-violet-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{h}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* KPI comparison */}
+            {scnK && (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <ScenarioKpiCard title="Revenue" baseVal={baseK.revenue} scnVal={scnK.revenue} goodWhenUp />
+                <ScenarioKpiCard title="Total Costs" baseVal={baseK.costs} scnVal={scnK.costs} goodWhenUp={false} />
+                <ScenarioKpiCard title="Net Cashflow" baseVal={baseK.net} scnVal={scnK.net} goodWhenUp />
+                <ScenarioKpiCard title="Ending Cash" baseVal={baseK.endBal} scnVal={scnK.endBal} goodWhenUp />
+              </div>
+            )}
+
+            {/* Closing-balance chart */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4">
+              <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Scale size={13} className="text-violet-500" />Closing cash balance — baseline vs scenario</p>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="month" tick={{ fontSize: 10 }} interval={Math.max(0, Math.floor(chartData.length / 12))} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={v => fmtAUD(v, true)} width={50} />
+                  <Tooltip formatter={v => fmtAUD(Number(v), false)} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Line type="monotone" dataKey="Baseline" stroke="#94a3b8" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="Scenario" stroke="#7c3aed" strokeWidth={2.5} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* ── Levers ─────────────────────────────────────────────────────── */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2">
+                <SlidersHorizontal size={15} className="text-violet-500" />
+                <h3 className="text-sm font-bold text-slate-800">Scenario levers</h3>
+              </div>
+              <div className="p-5 space-y-6">
+                {/* Cost cuts */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5"><CreditCard size={13} className="text-rose-500" />Cost reductions</p>
+                    <button onClick={addCostCut} className="text-[11px] text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1"><Plus size={12} />Add</button>
+                  </div>
+                  {(active.levers.costCuts || []).length === 0 && <p className="text-[11px] text-slate-400">No cost cuts. Add one to reduce an account, a section, or all costs by a %.</p>}
+                  <div className="space-y-2">
+                    {(active.levers.costCuts || []).map(c => (
+                      <div key={c.id} className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-slate-500">Reduce</span>
+                        <select value={c.target} onChange={e => editLeverRow("costCuts", c.id, { target: e.target.value })} className={inputCls}>
+                          {SCENARIO_COST_TARGETS.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                        <span className="text-[11px] text-slate-500">in</span>
+                        <select value={c.fy} onChange={e => editLeverRow("costCuts", c.id, { fy: e.target.value })} className={inputCls}>
+                          {["All", ...SCENARIO_FY_LIST].map(f => <option key={f} value={f}>{f === "All" ? "All years" : f}</option>)}
+                        </select>
+                        <span className="text-[11px] text-slate-500">by</span>
+                        <input type="number" min="0" max="100" value={c.pct} onChange={e => editLeverRow("costCuts", c.id, { pct: Number(e.target.value) || 0 })} className={`${inputCls} w-16 text-center`} />
+                        <span className="text-[11px] text-slate-500">%</span>
+                        <button onClick={() => removeLeverRow("costCuts", c.id)} className="text-slate-300 hover:text-rose-500 ml-auto"><X size={13} /></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Unit uplift */}
+                <div className="pt-1 border-t border-slate-50">
+                  <div className="flex items-center justify-between mb-2 mt-3">
+                    <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5"><TrendingUp size={13} className="text-emerald-500" />New programs / volume growth</p>
+                    <button onClick={addUplift} className="text-[11px] text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1"><Plus size={12} />Add</button>
+                  </div>
+                  {(active.levers.unitUplift || []).length === 0 && <p className="text-[11px] text-slate-400">No volume changes. Add one to lift enrolments/units (and revenue) for a region.</p>}
+                  <div className="space-y-2">
+                    {(active.levers.unitUplift || []).map(u => (
+                      <div key={u.id} className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-slate-500">Increase volume in</span>
+                        <select value={u.region} onChange={e => editLeverRow("unitUplift", u.id, { region: e.target.value })} className={inputCls}>
+                          {["All", ...SCENARIO_REGIONS].map(r => <option key={r} value={r}>{r === "All" ? "All regions" : r}</option>)}
+                        </select>
+                        <span className="text-[11px] text-slate-500">by</span>
+                        <input type="number" min="-100" max="200" value={u.pct} onChange={e => editLeverRow("unitUplift", u.id, { pct: Number(e.target.value) || 0 })} className={`${inputCls} w-16 text-center`} />
+                        <span className="text-[11px] text-slate-500">%</span>
+                        <button onClick={() => removeLeverRow("unitUplift", u.id)} className="text-slate-300 hover:text-rose-500 ml-auto"><X size={13} /></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Hires */}
+                <div className="pt-1 border-t border-slate-50">
+                  <div className="flex items-center justify-between mb-2 mt-3">
+                    <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5"><Users size={13} className="text-blue-500" />Staffing changes</p>
+                    <button onClick={addHire} className="text-[11px] text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1"><Plus size={12} />Add</button>
+                  </div>
+                  {(active.levers.hires || []).length === 0 && <p className="text-[11px] text-slate-400">No staffing changes. Add a hire or model a departure.</p>}
+                  <div className="space-y-2">
+                    {(active.levers.hires || []).map(h => (
+                      <div key={h.id} className="flex flex-wrap items-center gap-2">
+                        <select value={h.eventType} onChange={e => editLeverRow("hires", h.id, { eventType: e.target.value })} className={inputCls}>
+                          <option value="hire">Add</option>
+                          <option value="departure">Remove</option>
+                        </select>
+                        <input type="number" min="1" max="20" value={h.count} onChange={e => editLeverRow("hires", h.id, { count: Number(e.target.value) || 1 })} className={`${inputCls} w-14 text-center`} />
+                        <select value={h.roleId} onChange={e => editLeverRow("hires", h.id, { roleId: e.target.value })} className={inputCls}>
+                          {STAFF_ROLES.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+                        </select>
+                        <span className="text-[11px] text-slate-500">in</span>
+                        <select value={h.region} onChange={e => editLeverRow("hires", h.id, { region: e.target.value })} className={inputCls}>
+                          {SCENARIO_REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                        <span className="text-[11px] text-slate-500">from</span>
+                        <select value={h.startMonth} onChange={e => editLeverRow("hires", h.id, { startMonth: e.target.value })} className={inputCls}>
+                          {ALL_MONTH_LABELS.map(m => <option key={m} value={m}>{m}</option>)}
+                        </select>
+                        <button onClick={() => removeLeverRow("hires", h.id)} className="text-slate-300 hover:text-rose-500 ml-auto"><X size={13} /></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Assumptions: wage + CPI */}
+                <div className="pt-1 border-t border-slate-50">
+                  <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mt-3 mb-2"><Activity size={13} className="text-amber-500" />Assumption overrides</p>
+                  {[{ key: "wage", label: "Wage growth" }, { key: "cpi", label: "CPI inflation" }].map(({ key, label }) => {
+                    const val = active.levers[key];
+                    return (
+                      <div key={key} className="flex flex-wrap items-center gap-2 mb-2">
+                        <label className="flex items-center gap-1.5 text-[11px] text-slate-600 w-28">
+                          <input type="checkbox" checked={!!val} onChange={e => setLevers({ [key]: e.target.checked ? { fy26: 0, fy27: 3, fy28: 3, effectiveMonth: "Jul-26" } : null })} />
+                          {label}
+                        </label>
+                        {val && SCENARIO_FY_LIST.map(fy => {
+                          const fk = fy.toLowerCase();
+                          return (
+                            <span key={fy} className="flex items-center gap-1">
+                              <span className="text-[10px] text-slate-400">{fy}</span>
+                              <input type="number" value={val[fk] ?? 0} onChange={e => setLevers({ [key]: { ...val, [fk]: Number(e.target.value) || 0 } })} className={`${inputCls} w-14 text-center`} />
+                              <span className="text-[10px] text-slate-400">%</span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                  <p className="text-[10px] text-slate-400">Unchecked = inherit the committed baseline assumption.</p>
+                </div>
+              </div>
+            </div>
+
+            {/* ── AI analysis ─────────────────────────────────────────────────── */}
+            <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center"><Sparkles size={14} className="text-white" /></div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">AI scenario analysis</h3>
+                    <p className="text-[10px] text-slate-400">Gemini reviews this scenario's impact, risks and next steps</p>
+                  </div>
+                </div>
+                <button onClick={analyseScenario} disabled={analysing}
+                  className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors">
+                  {analysing ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                  {analysing ? "Analysing…" : analysis ? "Re-analyse" : "Analyse scenario"}
+                </button>
+              </div>
+              {analysis && (
+                <div className="p-5 space-y-4">
+                  {analysis.summary && <p className="text-sm text-slate-700 leading-relaxed bg-violet-50 border border-violet-100 rounded-lg p-3">{analysis.summary}</p>}
+                  {[{ k: "impacts", t: "Key impacts", c: "text-slate-700", i: BarChart2 }, { k: "risks", t: "Risks & assumptions", c: "text-amber-700", i: AlertTriangle }, { k: "recommendations", t: "Recommendations", c: "text-emerald-700", i: CheckCircle }].map(({ k, t, c, i: Icon }) => (
+                    analysis[k]?.length > 0 && (
+                      <div key={k}>
+                        <p className={`text-xs font-bold mb-1.5 flex items-center gap-1.5 ${c}`}><Icon size={12} />{t}</p>
+                        <ul className="space-y-1">
+                          {analysis[k].map((item, idx) => <li key={idx} className="flex items-start gap-2 text-xs text-slate-600"><ChevronRight size={12} className="shrink-0 mt-0.5 text-slate-300" />{item}</li>)}
+                        </ul>
+                      </div>
+                    )
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── AI scenario suggester (always available) ──────────────────────────── */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center"><Lightbulb size={14} className="text-white" /></div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">Suggest scenarios with AI</h3>
+              <p className="text-[10px] text-slate-400">Describe a goal — Gemini proposes ready-to-apply scenarios</p>
+            </div>
+          </div>
+          <div className="p-5 space-y-3">
+            <div className="flex gap-2">
+              <input value={goal} onChange={e => setGoal(e.target.value)} placeholder="e.g. lift net cashflow by $300k without cutting trainers"
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-amber-400 outline-none" />
+              <button onClick={suggestScenarios} disabled={suggesting}
+                className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white px-3 py-2 rounded-lg text-xs font-semibold transition-colors shrink-0">
+                {suggesting ? <Loader2 size={12} className="animate-spin" /> : <Lightbulb size={12} />}
+                {suggesting ? "Thinking…" : "Suggest"}
+              </button>
+            </div>
+            {suggestions.map((sug, i) => (
+              <div key={i} className="border border-slate-200 rounded-xl p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-800">{sug.name}</p>
+                    {sug.rationale && <p className="text-[11px] text-slate-500 mt-0.5">{sug.rationale}</p>}
+                  </div>
+                  <button onClick={() => applySuggestion(sug)} className="shrink-0 flex items-center gap-1 bg-violet-100 hover:bg-violet-200 text-violet-700 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors">
+                    <Plus size={11} />Apply
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {(sug.levers?.costCuts || []).map((c, j) => <span key={`c${j}`} className="text-[10px] bg-rose-50 text-rose-600 px-2 py-0.5 rounded-full">−{c.pct}% {c.target} ({c.fy})</span>)}
+                  {(sug.levers?.unitUplift || []).map((u, j) => <span key={`u${j}`} className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">+{u.pct}% volume {u.region}</span>)}
+                  {(sug.levers?.hires || []).map((h, j) => <span key={`h${j}`} className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full">{h.eventType === "departure" ? "−" : "+"}{h.count} {h.roleId} {h.region}</span>)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {aiError && <p className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">{aiError}</p>}
+      </div>
+    </div>
+  );
+}
+
 // ─── LAYOUT ───────────────────────────────────────────────────────────────────
 const NAV = [
   {id:"dashboard", label:"Overview",      icon:LayoutDashboard, group:"Analytics"},
@@ -8536,6 +9184,7 @@ const NAV = [
   {id:"modeler",   label:"Unit Modeler",  icon:Edit,            group:"Planning"},
   {id:"staffing",  label:"Staffing",      icon:Users,           group:"Planning"},
   {id:"staff",     label:"Staff Planner", icon:Users,           group:"Planning"},
+  {id:"scenarios", label:"Scenario Lab",  icon:FlaskConical,    group:"Planning"},
   {id:"crm",       label:"CRM Report",    icon:BarChart2,       group:"Analytics"},
   {id:"data",      label:"Raw Data",      icon:Table,           group:"Source"},
   {id:"calc-audit", label:"Calc Audit",    icon:Shield,          group:"Admin"},
@@ -9157,6 +9806,8 @@ export default function App() {
   const props = {data, yearBasis, selectedYear};
   const wageProps = { draftWage, appliedWage, onDraftChange: setDraftWage, onApply: handleApplyWage, onClear: handleClearWage, peopleOverrides };
   const cpiProps  = { draftCpi,  appliedCpi,  onDraftChange: setDraftCpi,  onApply: handleApplyCpi,  onClear: handleClearCpi  };
+  // Committed inputs the Scenario Lab layers its non-destructive overlays on top of.
+  const scenarioBase = { unitAdjustments, filledHires, coaAdjustments, peopleOverrides, appliedWage, appliedCpi, xeroActuals };
 
   return (
     <Layout
@@ -9177,6 +9828,7 @@ export default function App() {
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
       {activeTab==="staff"     && <StaffPlanner {...props} hiringEvents={hiringEvents} setHiringEvents={setHiringEvents} onSaveHiring={handleSaveHiring}/>}
+      {activeTab==="scenarios" && <ScenarioLab base={scenarioBase} baseData={data} currentUser={currentUser}/>}
       {activeTab==="crm"       && <CRMSalesReport {...props}/>}
       {activeTab==="data"      && <RawDataTable {...props}/>}
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
