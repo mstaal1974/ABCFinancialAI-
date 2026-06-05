@@ -9185,13 +9185,40 @@ const ENROLMENT_LS_KEY = "enrolment_plan_v1";
 const ALL_PROGRAMS = [...new Set(Object.values(UNIT_ASSUMPTIONS_FY26).flatMap(c => Object.keys(c)))];
 
 // Default client segments — editable. A "segment" captures how a class of client
-// buys: how many unit-enrolments an average student takes, and the share of leads
-// that convert to enrolment. (The CRM feed is monthly pipeline only, so segment
-// economics are modelled assumptions rather than per-client records.)
+// buys: a units factor (multiplier on the program's unit count, e.g. corporate
+// cohorts doing partial quals < 1), and the share of leads that convert. (The CRM
+// feed is monthly pipeline only, so segment economics are modelled assumptions.)
 const DEFAULT_SEGMENTS = [
   { id: "seg-gov", name: "Government-funded", avgUnits: 1, conversion: 0.6 },
-  { id: "seg-corp", name: "Corporate / B2B", avgUnits: 2, conversion: 0.4 },
+  { id: "seg-corp", name: "Corporate / B2B", avgUnits: 1, conversion: 0.4 },
   { id: "seg-ind", name: "Individual", avgUnits: 1, conversion: 0.3 },
+];
+
+// Units of competency per program (qualification). In this model the per-region
+// price is charged PER UNIT, so a student enrolling in a qualification generates
+// (units of competency) × price of revenue. These are typical training.gov.au
+// packaging counts — EDIT in the planner to match the exact qualification rules.
+const DEFAULT_PROGRAM_UNITS = {
+  MSL20122: 10, MSL30122: 16, MSL40122: 19, MSL50122: 20, MSL60122: 16,
+  HLT37215: 13, MSM30318: 14, MSM30116: 12, MSM40116: 14, BSB50420: 12,
+  FFS: 3, BSB50420_FFS: 4, VETIS_FFS: 4, VETIS_FFS_QLD: 4,
+};
+function programUnitCount(program, region, overrides = {}) {
+  if (program && program !== "Blended") return overrides[program] ?? DEFAULT_PROGRAM_UNITS[program] ?? 1;
+  // Blended → average unit count across the region's sellable programs.
+  const courses = UNIT_ASSUMPTIONS_FY26[region] || {};
+  const codes = Object.keys(courses).filter(c => (courses[c]?.price || 0) > 0);
+  if (!codes.length) return 1;
+  return codes.reduce((s, c) => s + (overrides[c] ?? DEFAULT_PROGRAM_UNITS[c] ?? 1), 0) / codes.length;
+}
+
+// Default named clients — editable / extendable. Each client carries the segment
+// it behaves like, a home region, and a typical number of students per intake.
+// Replace these with your real accounts (or import them).
+const DEFAULT_CLIENTS = [
+  { id: "cli-1", name: "QLD Health", segmentId: "seg-gov", region: "QLD", avgStudents: 40 },
+  { id: "cli-2", name: "SA Pathology", segmentId: "seg-gov", region: "SA", avgStudents: 25 },
+  { id: "cli-3", name: "Corporate Labs Group", segmentId: "seg-corp", region: "NSW", avgStudents: 15 },
 ];
 
 // Average unit price for a region+program. program === "Blended" → average of the
@@ -9226,7 +9253,9 @@ function trainerCapacityUnits(months, perMonth, useRamp) {
 function EnrolmentPlanner({ baseData, currentUser }) {
   const [target, setTarget] = useState({ metric: "addRevenue", value: 500000, horizon: "FY27" });
   const [segments, setSegments] = useState(DEFAULT_SEGMENTS);
-  const [rows, setRows] = useState([]); // {id, region, program, segmentId, students}
+  const [programUnits, setProgramUnits] = useState(DEFAULT_PROGRAM_UNITS);
+  const [clients, setClients] = useState(DEFAULT_CLIENTS);
+  const [rows, setRows] = useState([]); // {id, region, program, segmentId, clientId, students}
   const [capacity, setCapacity] = useState({ trainers: 2, perTrainerPerMonth: 42, useRamp: false });
   const [solveTpl, setSolveTpl] = useState({ region: SCENARIO_REGIONS[0], program: "Blended", segmentId: "seg-gov" });
   const [loaded, setLoaded] = useState(false);
@@ -9254,6 +9283,8 @@ function EnrolmentPlanner({ baseData, currentUser }) {
       if (saved) {
         if (saved.target) setTarget(saved.target);
         if (saved.segments) setSegments(saved.segments);
+        if (saved.programUnits) setProgramUnits({ ...DEFAULT_PROGRAM_UNITS, ...saved.programUnits });
+        if (saved.clients) setClients(saved.clients);
         if (saved.rows) setRows(saved.rows);
         if (saved.capacity) setCapacity(saved.capacity);
       }
@@ -9265,7 +9296,7 @@ function EnrolmentPlanner({ baseData, currentUser }) {
   // Debounced persist whenever the plan changes.
   useEffect(() => {
     if (!loaded) return;
-    const payload = { target, segments, rows, capacity };
+    const payload = { target, segments, programUnits, clients, rows, capacity };
     try { localStorage.setItem(ENROLMENT_LS_KEY, JSON.stringify(payload)); } catch { /* storage unavailable */ }
     const t = setTimeout(() => {
       sbUpsert("enrolment_plans", [{
@@ -9274,7 +9305,7 @@ function EnrolmentPlanner({ baseData, currentUser }) {
       }]).catch(() => {});
     }, 800);
     return () => clearTimeout(t);
-  }, [target, segments, rows, capacity, loaded, currentUser]);
+  }, [target, segments, programUnits, clients, rows, capacity, loaded, currentUser]);
 
   const months = monthsForHorizon(target.horizon);
   const segById = (id) => segments.find(s => s.id === id) || segments[0];
@@ -9302,17 +9333,19 @@ function EnrolmentPlanner({ baseData, currentUser }) {
       const price = unitPriceFor(r.region, r.program);
       const seg = segById(r.segmentId);
       const students = Number(r.students) || 0;
-      const units = students * (seg?.avgUnits || 1);
+      const unitsPerStudent = programUnitCount(r.program, r.region, programUnits) * (seg?.avgUnits || 1);
+      const units = students * unitsPerStudent;
       const revenue = units * price;
       const leads = seg?.conversion > 0 ? Math.ceil(students / seg.conversion) : students;
-      return { ...r, price, segName: seg?.name || "—", units, revenue, leads };
+      const clientName = r.clientId ? (clients.find(c => c.id === r.clientId)?.name || "—") : null;
+      return { ...r, price, segName: seg?.name || "—", unitsPerStudent, units, revenue, leads, clientName };
     });
     const totals = list.reduce((a, r) => ({
       students: a.students + r.students, units: a.units + r.units,
       revenue: a.revenue + r.revenue, leads: a.leads + r.leads,
     }), { students: 0, units: 0, revenue: 0, leads: 0 });
     return { list, totals };
-  }, [rows, segments]);
+  }, [rows, segments, programUnits, clients]);
 
   const gap = requiredRevenue - computed.totals.revenue;
 
@@ -9331,16 +9364,29 @@ function EnrolmentPlanner({ baseData, currentUser }) {
   const netImpact = computed.totals.revenue - capCalc.extraCost;
 
   // ── Row + segment editors ─────────────────────────────────────────────────────
-  const addRow = (preset) => setRows(rs => [...rs, { id: Math.random().toString(36).slice(2, 7), region: SCENARIO_REGIONS[0], program: "Blended", segmentId: segments[0]?.id, students: 50, ...preset }]);
+  const addRow = (preset) => setRows(rs => [...rs, { id: Math.random().toString(36).slice(2, 7), region: SCENARIO_REGIONS[0], program: "Blended", segmentId: segments[0]?.id, clientId: "", students: 50, ...preset }]);
   const editRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
   const removeRow = (id) => setRows(rs => rs.filter(r => r.id !== id));
   const editSeg = (id, patch) => setSegments(ss => ss.map(s => s.id === id ? { ...s, ...patch } : s));
+  const editProgramUnits = (program, val) => setProgramUnits(pu => ({ ...pu, [program]: Number(val) || 0 }));
+  const addClient = () => setClients(cs => [...cs, { id: `cli-${Math.random().toString(36).slice(2, 7)}`, name: "New client", segmentId: segments[0]?.id, region: SCENARIO_REGIONS[0], avgStudents: 20 }]);
+  const editClient = (id, patch) => setClients(cs => cs.map(c => c.id === id ? { ...c, ...patch } : c));
+  const removeClient = (id) => setClients(cs => cs.filter(c => c.id !== id));
+
+  // When a row is attached to a named client, inherit its region/segment + suggest students.
+  const attachClient = (rowId, clientId) => {
+    const c = clients.find(x => x.id === clientId);
+    if (!c) { editRow(rowId, { clientId: "" }); return; }
+    editRow(rowId, { clientId, region: c.region, segmentId: c.segmentId, students: c.avgStudents || 20 });
+  };
+
+  // Revenue generated by ONE student of a given region/program/segment.
+  const revPerStudentFor = (region, program, segmentId) =>
+    unitPriceFor(region, program) * programUnitCount(program, region, programUnits) * (segById(segmentId)?.avgUnits || 1);
 
   // Goal-seek: solve students needed to close the remaining gap with a template.
   const solveForGap = () => {
-    const price = unitPriceFor(solveTpl.region, solveTpl.program);
-    const seg = segById(solveTpl.segmentId);
-    const revPerStudent = price * (seg?.avgUnits || 1);
+    const revPerStudent = revPerStudentFor(solveTpl.region, solveTpl.program, solveTpl.segmentId);
     if (revPerStudent <= 0 || gap <= 0) return;
     const students = Math.ceil(gap / revPerStudent);
     addRow({ region: solveTpl.region, program: solveTpl.program, segmentId: solveTpl.segmentId, students });
@@ -9348,28 +9394,31 @@ function EnrolmentPlanner({ baseData, currentUser }) {
 
   // ── Sensitivity: students required to close the gap, per region (blended) ──────
   const sensitivity = useMemo(() => {
-    const seg = segById(solveTpl.segmentId);
     const need = Math.max(0, gap);
     return SCENARIO_REGIONS.map(region => {
       const price = unitPriceFor(region, "Blended");
-      const revPerStudent = price * (seg?.avgUnits || 1);
+      const revPerStudent = revPerStudentFor(region, "Blended", solveTpl.segmentId);
       const students = revPerStudent > 0 ? Math.ceil(need / revPerStudent) : null;
       return { region, price, students };
     }).filter(r => r.price > 0).sort((a, b) => (a.students ?? 1e9) - (b.students ?? 1e9));
-  }, [gap, solveTpl.segmentId, segments]);
+  }, [gap, solveTpl.segmentId, segments, programUnits]);
 
   // ── AI: recommend an enrolment plan ───────────────────────────────────────────
   const recommendPlan = async () => {
     setPlanning(true); setAiErr(""); setAiPlan(null);
     try {
-      const priceTable = SCENARIO_REGIONS.map(r => `${r}: blended $${unitPriceFor(r, "Blended")}/unit`).join("; ");
+      const priceTable = SCENARIO_REGIONS.map(r => `${r}: blended $${unitPriceFor(r, "Blended")}/unit (~${programUnitCount("Blended", r, programUnits).toFixed(0)} units/qual)`).join("; ");
+      const clientLine = clients.length ? clients.map(c => `${c.name} (${c.region}, ${segById(c.segmentId)?.name}, ~${c.avgStudents} students/intake)`).join("; ") : "none defined";
       const prompt = `You are an enrolment strategist for ABC Training, an Australian RTO. Work out a realistic NEW-STUDENT acquisition plan to hit this target over ${target.horizon} (${months} months).
+
+A student enrolls in a qualification made up of multiple UNITS OF COMPETENCY, and each unit is billed at the region's per-unit price — so revenue per student = (units in the qualification) × ($/unit).
 
 TARGET: ${target.metric === "addRevenue" ? "additional revenue" : target.metric === "totalRevenue" ? "total revenue" : "net cashflow"} of $${Number(target.value).toLocaleString()}.
 Additional revenue still required from new students: $${Math.round(Math.max(0, gap)).toLocaleString()}.
 Baseline this horizon: revenue $${Math.round(baseRef.revenue).toLocaleString()}, net cashflow $${Math.round(baseRef.net).toLocaleString()}.
-Avg unit prices by region: ${priceTable}.
-Client segments (avg units/student, lead→enrolment conversion): ${segments.map(s => `${s.name} (${s.avgUnits}u, ${Math.round(s.conversion * 100)}%)`).join("; ")}.
+Region prices & qualification sizes: ${priceTable}.
+Client segments (units factor, lead→enrolment conversion): ${segments.map(s => `${s.name} (×${s.avgUnits}, ${Math.round(s.conversion * 100)}%)`).join("; ")}.
+Named clients available to target: ${clientLine}.
 Trainer capacity: ${capacity.trainers} trainer(s) × ${capacity.perTrainerPerMonth} units/mo ≈ ${capCalc.maxUnits.toLocaleString()} units over the horizon. Each extra trainer costs ~$${Math.round(getMonthlyCost("trainer") * months).toLocaleString()}.
 
 Propose a mix of enrolment rows. Each row: region, program (use "Blended" unless a specific course is clearly better), segment (one of: ${segments.map(s => s.name).join(", ")}), and number of new students. Keep the plan within or just beyond current trainer capacity, and call out if extra trainers are needed.
@@ -9379,7 +9428,7 @@ ROWS
 region|program|segment|students
 QLD|Blended|Government-funded|120
 PLAN
-One short bullet per line on the recommended approach, sequencing, conversion levers and trainer implications.`;
+One short bullet per line on the recommended approach, which named clients to pursue, sequencing, conversion levers and trainer implications.`;
 
       const raw = await callGemini(prompt, "", 1536);
       const result = { rows: [], notes: [] };
@@ -9491,10 +9540,12 @@ One short bullet per line on the recommended approach, sequencing, conversion le
           <table className="w-full text-xs">
             <thead className="bg-slate-50 text-slate-500">
               <tr>
+                <th className="px-3 py-2 text-left font-semibold">Client</th>
                 <th className="px-3 py-2 text-left font-semibold">Region</th>
                 <th className="px-3 py-2 text-left font-semibold">Program</th>
-                <th className="px-3 py-2 text-left font-semibold">Client segment</th>
+                <th className="px-3 py-2 text-left font-semibold">Segment</th>
                 <th className="px-3 py-2 text-right font-semibold">Students</th>
+                <th className="px-3 py-2 text-right font-semibold" title="Units of competency per student × segment factor">U/student</th>
                 <th className="px-3 py-2 text-right font-semibold">$/unit</th>
                 <th className="px-3 py-2 text-right font-semibold">Units</th>
                 <th className="px-3 py-2 text-right font-semibold">Leads</th>
@@ -9504,10 +9555,16 @@ One short bullet per line on the recommended approach, sequencing, conversion le
             </thead>
             <tbody>
               {computed.list.length === 0 && (
-                <tr><td colSpan={9} className="px-3 py-6 text-center text-slate-400">No rows yet. Add one, or use “Solve for gap” / AI below.</td></tr>
+                <tr><td colSpan={11} className="px-3 py-6 text-center text-slate-400">No rows yet. Add one, or use “Solve for gap” / AI below.</td></tr>
               )}
               {computed.list.map(r => (
                 <tr key={r.id} className="border-t border-slate-100">
+                  <td className="px-3 py-1.5">
+                    <select value={r.clientId || ""} onChange={e => attachClient(r.id, e.target.value)} className={inputCls}>
+                      <option value="">— none —</option>
+                      {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </td>
                   <td className="px-3 py-1.5">
                     <select value={r.region} onChange={e => editRow(r.id, { region: e.target.value, program: "Blended" })} className={inputCls}>
                       {SCENARIO_REGIONS.map(rg => <option key={rg} value={rg}>{rg}</option>)}
@@ -9524,8 +9581,9 @@ One short bullet per line on the recommended approach, sequencing, conversion le
                     </select>
                   </td>
                   <td className="px-3 py-1.5 text-right">
-                    <input type="number" min="0" value={r.students} onChange={e => editRow(r.id, { students: Number(e.target.value) || 0 })} className={`${inputCls} w-20 text-right`} />
+                    <input type="number" min="0" value={r.students} onChange={e => editRow(r.id, { students: Number(e.target.value) || 0, clientId: "" })} className={`${inputCls} w-20 text-right`} />
                   </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-slate-500">{r.unitsPerStudent.toFixed(1)}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-500">${r.price}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-600">{Math.round(r.units).toLocaleString()}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-400">{r.leads.toLocaleString()}</td>
@@ -9537,8 +9595,9 @@ One short bullet per line on the recommended approach, sequencing, conversion le
             {computed.list.length > 0 && (
               <tfoot>
                 <tr className="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-700">
-                  <td className="px-3 py-2" colSpan={3}>Total</td>
+                  <td className="px-3 py-2" colSpan={4}>Total</td>
                   <td className="px-3 py-2 text-right">{Math.round(computed.totals.students).toLocaleString()}</td>
+                  <td></td>
                   <td></td>
                   <td className="px-3 py-2 text-right">{Math.round(computed.totals.units).toLocaleString()}</td>
                   <td className="px-3 py-2 text-right text-slate-400">{computed.totals.leads.toLocaleString()}</td>
@@ -9563,7 +9622,7 @@ One short bullet per line on the recommended approach, sequencing, conversion le
             {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           <button onClick={solveForGap} disabled={gapClosed} className="bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1">
-            <Plus size={12} />{gapClosed ? "Target met" : `Add ${(() => { const p = unitPriceFor(solveTpl.region, solveTpl.program) * (segById(solveTpl.segmentId)?.avgUnits || 1); return p > 0 ? Math.ceil(Math.max(0, gap) / p).toLocaleString() : "—"; })()} students`}
+            <Plus size={12} />{gapClosed ? "Target met" : `Add ${(() => { const p = revPerStudentFor(solveTpl.region, solveTpl.program, solveTpl.segmentId); return p > 0 ? Math.ceil(Math.max(0, gap) / p).toLocaleString() : "—"; })()} students`}
           </button>
         </div>
       </div>
@@ -9608,17 +9667,62 @@ One short bullet per line on the recommended approach, sequencing, conversion le
           <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Tag size={14} className="text-emerald-500" />Client segment assumptions</p>
           <div className="space-y-2">
             <div className="grid grid-cols-[1fr_70px_70px] gap-2 text-[10px] text-slate-400 font-semibold uppercase px-1">
-              <span>Segment</span><span className="text-center">Units/student</span><span className="text-center">Conversion</span>
+              <span>Segment</span><span className="text-center">Units factor</span><span className="text-center">Conversion</span>
             </div>
             {segments.map(s => (
               <div key={s.id} className="grid grid-cols-[1fr_70px_70px] gap-2 items-center">
                 <input value={s.name} onChange={e => editSeg(s.id, { name: e.target.value })} className={inputCls} />
-                <input type="number" min="0" step="0.5" value={s.avgUnits} onChange={e => editSeg(s.id, { avgUnits: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
+                <input type="number" min="0" step="0.1" value={s.avgUnits} onChange={e => editSeg(s.id, { avgUnits: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
                 <input type="number" min="0" max="1" step="0.05" value={s.conversion} onChange={e => editSeg(s.id, { conversion: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
               </div>
             ))}
           </div>
-          <p className="text-[10px] text-slate-400 mt-2">Conversion = share of leads that enrol. Leads needed = students ÷ conversion.</p>
+          <p className="text-[10px] text-slate-400 mt-2">Units factor multiplies the program's unit count (1 = full qualification, &lt;1 = partial / skill set). Conversion = share of leads that enrol; leads needed = students ÷ conversion.</p>
+        </div>
+      </div>
+
+      {/* ── Named clients + program unit counts ───────────────────────────────── */}
+      <div className="grid lg:grid-cols-2 gap-5">
+        {/* Named clients */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5"><UserCircle size={14} className="text-blue-500" />Named clients</p>
+            <button onClick={addClient} className="text-[11px] text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1"><Plus size={12} />Add</button>
+          </div>
+          <div className="space-y-2">
+            <div className="grid grid-cols-[1fr_70px_110px_64px_24px] gap-2 text-[10px] text-slate-400 font-semibold uppercase px-1">
+              <span>Client</span><span>Region</span><span>Segment</span><span className="text-center">Students</span><span></span>
+            </div>
+            {clients.length === 0 && <p className="text-[11px] text-slate-400">No clients yet — add your real accounts here.</p>}
+            {clients.map(c => (
+              <div key={c.id} className="grid grid-cols-[1fr_70px_110px_64px_24px] gap-2 items-center">
+                <input value={c.name} onChange={e => editClient(c.id, { name: e.target.value })} className={inputCls} />
+                <select value={c.region} onChange={e => editClient(c.id, { region: e.target.value })} className={inputCls}>
+                  {SCENARIO_REGIONS.map(rg => <option key={rg} value={rg}>{rg}</option>)}
+                </select>
+                <select value={c.segmentId} onChange={e => editClient(c.id, { segmentId: e.target.value })} className={inputCls}>
+                  {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <input type="number" min="0" value={c.avgStudents} onChange={e => editClient(c.id, { avgStudents: Number(e.target.value) || 0 })} className={`${inputCls} text-center`} />
+                <button onClick={() => removeClient(c.id)} className="text-slate-300 hover:text-rose-500"><X size={13} /></button>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-2">Attach a client to an enrolment row above to inherit its region, segment and typical intake size.</p>
+        </div>
+
+        {/* Program unit counts */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Box size={14} className="text-amber-500" />Units of competency per program</p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+            {ALL_PROGRAMS.map(p => (
+              <div key={p} className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-slate-600 font-mono truncate" title={p}>{p}</span>
+                <input type="number" min="1" value={programUnits[p] ?? DEFAULT_PROGRAM_UNITS[p] ?? 1} onChange={e => editProgramUnits(p, e.target.value)} className={`${inputCls} w-16 text-center`} />
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-3">Price is charged per unit, so revenue/student = units × $/unit. Defaults are typical packaging — edit to match training.gov.au.</p>
         </div>
       </div>
 
