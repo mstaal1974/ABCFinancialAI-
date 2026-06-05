@@ -4445,7 +4445,12 @@ function RestorePanel({ currentUser }) {
       const after = await sbGet("unit_adjustments");
       const freshMap = {};
       (after || []).forEach(row => { if (row.key && row.value !== null) freshMap[row.key] = row.value; });
+      const restoreTs = new Date().toISOString();
       localStorage.setItem("unit_model_adjustments", JSON.stringify(freshMap));
+      // Restored map came straight from the DB — mark it fully synced so the
+      // load-time reconciliation treats it as authoritative.
+      localStorage.setItem("unit_model_adjustments_ts", restoreTs);
+      localStorage.setItem("unit_model_synced_ts", restoreTs);
 
       setPhase("done");
       setTimeout(() => window.location.reload(), 1400);
@@ -8689,15 +8694,42 @@ export default function App() {
     async function loadData() {
       try {
         const adjData = await sbGet("unit_adjustments");
-        if (adjData && Array.isArray(adjData) && adjData.length > 0) {
-          const adj = {};
-          adjData.forEach(row => { if(row.key && row.value!==null) adj[row.key] = row.value; });
-          setUnitAdjustments(adj);
-          console.log(`✓ Loaded ${adjData.length} unit adjustments from Supabase`);
-        } else {
-          // Fallback to localStorage if Supabase table empty or missing
-          const saved = localStorage.getItem("unit_model_adjustments");
-          if (saved) { setUnitAdjustments(JSON.parse(saved)); console.log("✓ Unit adjustments loaded from localStorage fallback"); }
+        // Reconcile Supabase vs localStorage and prefer whichever is newer, instead of
+        // always letting the DB shadow local edits. localStorage carries two markers:
+        //   unit_model_adjustments_ts → time of the last local edit
+        //   unit_model_synced_ts      → time of the last edit confirmed saved to the DB
+        // If there are local edits made *after* the last confirmed sync, they are
+        // at-risk unsaved changes — recover them and push them back up to Supabase.
+        const sbMap = {};
+        if (adjData && Array.isArray(adjData)) adjData.forEach(row => { if(row.key && row.value!==null) sbMap[row.key] = row.value; });
+        let lsMap = null;
+        try { const raw = localStorage.getItem("unit_model_adjustments"); lsMap = raw ? JSON.parse(raw) : null; } catch { /* ignore malformed cache */ }
+        const lsTs = localStorage.getItem("unit_model_adjustments_ts");
+        const syncedTs = localStorage.getItem("unit_model_synced_ts");
+        const hasUnsyncedLocal = lsMap && Object.keys(lsMap).length > 0 && lsTs && (!syncedTs || lsTs > syncedTs);
+
+        if (hasUnsyncedLocal) {
+          // Local edits are newer than the last confirmed DB sync — they win.
+          const merged = { ...sbMap, ...lsMap };
+          setUnitAdjustments(merged);
+          console.warn("⚠ Unit adjustments: found local edits newer than the last DB sync — recovering them and re-syncing to Supabase.");
+          const rows = Object.entries(merged).map(([key, value]) => ({ key, value }));
+          if (rows.length > 0) {
+            const ok = await sbUpsert("unit_adjustments", rows);
+            const now = new Date().toISOString();
+            localStorage.setItem("unit_model_adjustments", JSON.stringify(merged));
+            localStorage.setItem("unit_model_adjustments_ts", now);
+            if (ok) localStorage.setItem("unit_model_synced_ts", now);
+          }
+        } else if (Object.keys(sbMap).length > 0) {
+          // No newer local edits — trust the DB. (Do not overwrite localStorage here,
+          // so any orphaned pre-fix edits remain recoverable by inspection.)
+          setUnitAdjustments(sbMap);
+          console.log(`✓ Loaded ${Object.keys(sbMap).length} unit adjustments from Supabase`);
+        } else if (lsMap && Object.keys(lsMap).length > 0) {
+          // DB empty/missing — fall back to localStorage.
+          setUnitAdjustments(lsMap);
+          console.log("✓ Unit adjustments loaded from localStorage fallback");
         }
 
         const hireData = await sbGet("hiring_plan");
@@ -8840,8 +8872,23 @@ export default function App() {
       const key = `${region}|${code}|${month}`;
       const oldVal = prev[key];
       const next = {...prev, [key]: newUnits};
+      const editTs = new Date().toISOString();
       localStorage.setItem("unit_model_adjustments", JSON.stringify(next));
+      localStorage.setItem("unit_model_adjustments_ts", editTs);
       sbAudit(currentUser, "UPDATE", "UNIT", `${region} · ${code} · ${month}`, oldVal ?? null, newUnits);
+      // Auto-save this edit to Supabase immediately so a reload can never revert it.
+      // (Previously, cell edits only went to localStorage and were silently shadowed
+      // on the next load by the older values in the unit_adjustments table.)
+      sbUpsert("unit_adjustments", [{ key, value: newUnits }]).then(ok => {
+        if (ok) {
+          // Only advance the "synced" marker forward, so a later-arriving success
+          // for an earlier edit can't mask a more recent edit that failed to save.
+          const prevSync = localStorage.getItem("unit_model_synced_ts");
+          if (!prevSync || editTs > prevSync) localStorage.setItem("unit_model_synced_ts", editTs);
+        } else {
+          console.error("unit_adjustments auto-save failed for key:", key);
+        }
+      });
       return next;
     });
   };
@@ -8959,11 +9006,15 @@ export default function App() {
     try {
       const rows = Object.entries(unitAdjustments).map(([key, value]) => ({key, value}));
       // Always save to localStorage first as reliable fallback
+      const saveTs = new Date().toISOString();
       localStorage.setItem("unit_model_adjustments", JSON.stringify(unitAdjustments));
+      localStorage.setItem("unit_model_adjustments_ts", saveTs);
       if (rows.length > 0) {
         const ok = await sbUpsert("unit_adjustments", rows);
         if (!ok) throw new Error("Supabase upsert returned not-ok");
       }
+      // Full map is now confirmed in the DB — mark everything synced.
+      localStorage.setItem("unit_model_synced_ts", saveTs);
       await sbAudit(currentUser, "UPDATE", "UNIT", `Saved unit adjustments (${rows.length} overrides)`);
       console.log(`✓ Unit adjustments saved: ${rows.length} rows`);
     } catch(e) {
