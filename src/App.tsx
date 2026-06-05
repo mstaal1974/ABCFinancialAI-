@@ -287,6 +287,9 @@ const CHART_OF_ACCOUNTS = [
   {section:"Overheads",account:"Staff Amenities",months:{Jul:167,Aug:167,Sep:167,Oct:167,Nov:189,Dec:12,Jan:0,Feb:0,Mar:50,Apr:50,May:50,Jun:50}},
   {section:"Overheads",account:"Marketing",months:{Jul:1000,Aug:1000,Sep:1000,Oct:1000,Nov:1000,Dec:1000,Jan:1000,Feb:1000,Mar:1000,Apr:1000,May:1000,Jun:1000}},
   {section:"Overheads",account:"Loan to Blocksure",months:{Jul:8000,Aug:8000,Sep:8000,Oct:8000,Nov:8000,Dec:8000,Jan:8000,Feb:8000,Mar:8000,Apr:8000,May:8000,Jun:8000}},
+  // One-off loan outflows (cash out). Mark Link: $150k drawn 1-Apr-2026; Nathan Baratta: $50k drawn 1-Mar-2026.
+  {section:"Overheads",account:"Mark Link Loan",months:{Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:150000,May:0,Jun:0}},
+  {section:"Overheads",account:"Nathan Baratta Loan",months:{Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:50000,Apr:0,May:0,Jun:0}},
 ];
 
 // ─── FY26 ACTUALS (from Xero P&L export, Feb 2026) ───────────────────────────
@@ -333,6 +336,8 @@ const ACTUALS_FY26 = {
   "Staff Amenities":       {Jul:167,   Aug:167,   Sep:167,   Oct:167,   Nov:189,   Dec:12,    Jan:0,     Feb:0},
   "Marketing":             {Jul:1000,  Aug:1000,  Sep:1000,  Oct:1000,  Nov:1000,  Dec:1000,  Jan:1000,  Feb:1000},
   "Loan to Blocksure":     {Jul:8000,  Aug:8000,  Sep:8000,  Oct:8000,  Nov:8000,  Dec:8000,  Jan:8000,  Feb:8000},
+  "Mark Link Loan":        {Jul:0,     Aug:0,     Sep:0,     Oct:0,     Nov:0,     Dec:0,     Jan:0,     Feb:0},
+  "Nathan Baratta Loan":   {Jul:0,     Aug:0,     Sep:0,     Oct:0,     Nov:0,     Dec:0,     Jan:0,     Feb:0},
 };
 
 // ─── Xero P&L actuals override helpers ────────────────────────────────────────
@@ -7845,6 +7850,8 @@ const ACCOUNT_ALIASES = {
   "Staff Amenities":       ["staff amenities", "amenities"],
   "Marketing":             ["marketing", "marketing expenses"],
   "Loan to Blocksure":     ["loan to blocksure", "blocksure loan", "blocksure"],
+  "Mark Link Loan":        ["mark link loan", "mark link", "marklink loan", "marklink"],
+  "Nathan Baratta Loan":   ["nathan baratta loan", "nathan baratta", "baratta loan", "baratta"],
 };
 const REVENUE_ROW_ALIASES = ["total income", "total revenue", "total trading income", "total operating income"];
 const INCOME_SECTION_HEADERS = ["income", "revenue", "trading income", "operating income"];
