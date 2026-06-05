@@ -589,7 +589,7 @@ function buildBaselineData(adjustments = {}, filledHires = [], coaAdjustments = 
   const _staffDeltaPerMonth = _effectiveMonthlyStaff - _defaultMonthlyStaff;
   console.log("[buildBaseline] filledHires:", filledHires.length, "| peopleOverrides keys:", Object.keys(peopleOverrides).length, "| staffDelta/mo:", Math.round(_staffDeltaPerMonth));
 
-  let balance = 850000;
+  let balance = 91615; // Opening cash position as at 30 Jun 2025 (FY26 starting balance)
   const CALC_ROWS = new Set(["Gross Wages (IncPAYG)", "Superannuation", "Payroll Tax"]);
   // CPI is applied on top of COST_INFLATION to non-staff COA rows (Direct
   // Costs + Overheads excl. wages/super/payroll-tax). Manual COA overrides
@@ -7487,7 +7487,7 @@ function CashFlowForecastView({ data }) {
   const startingBalance = useMemo(() => {
     const ops = data.operationalFinancials.filter(op => op.dateObj < startDate);
     const last = ops[ops.length - 1];
-    return last ? Math.round(last.closingBalance) : 850000;
+    return last ? Math.round(last.closingBalance) : 91615;
   }, [data, startDate]);
   const startingBalanceLabel = useMemo(() => {
     const ops = data.operationalFinancials.filter(op => op.dateObj < startDate);
