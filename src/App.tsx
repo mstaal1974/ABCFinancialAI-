@@ -8611,13 +8611,20 @@ function computeScenarioData(scenario, base) {
   });
 
   // 2b. Region withdrawal → zero out a region's units (and therefore revenue)
-  //     entirely, modelling exiting that market. Costs are intentionally left
-  //     untouched — that gap is the whole point of the coverage analysis.
-  (lv.regionsOff || []).forEach(region => {
+  //     from an optional "from month" onward, modelling exiting that market.
+  //     Months before the exit keep their baseline; costs are left untouched —
+  //     that gap is the whole point of the coverage analysis. Entries may be a
+  //     bare region string (legacy = withdraw entirely) or { region, fromMonth }.
+  (lv.regionsOff || []).forEach(entry => {
+    const region = typeof entry === "string" ? entry : entry?.region;
+    const fromMonth = typeof entry === "string" ? ALL_MONTH_LABELS[0] : (entry?.fromMonth || ALL_MONTH_LABELS[0]);
     const courses = UNIT_ASSUMPTIONS_FY26[region];
     if (!courses) return;
+    const fromIdx = Math.max(0, ALL_MONTH_LABELS.indexOf(fromMonth));
     Object.keys(courses).forEach(code => {
-      MONTH_SCHEDULE.forEach(({ label }) => { units[`${region}|${code}|${label}`] = 0; });
+      MONTH_SCHEDULE.forEach(({ label }, i) => {
+        if (i >= fromIdx) units[`${region}|${code}|${label}`] = 0;
+      });
     });
   });
 
@@ -9023,7 +9030,12 @@ function ScenarioLab({ base, baseData, currentUser }) {
         ...(lv.costCuts || []).map(c => `Cut ${c.target} by ${c.pct}% (${c.fy})`),
         ...(lv.unitUplift || []).map(u => `Increase program volume ${u.region === "All" ? "across all regions" : "in " + u.region} by ${u.pct}%`),
         ...(lv.hires || []).map(h => `${h.eventType === "departure" ? "Remove" : "Add"} ${h.count}× ${STAFF_ROLES.find(r => r.id === h.roleId)?.label || h.roleId} in ${h.region} from ${h.startMonth}`),
-        ...(lv.regionsOff || []).map(r => `Withdraw from ${r} (remove all ${r} revenue; costs unchanged)`),
+        ...(lv.regionsOff || []).map(e => {
+          const region = typeof e === "string" ? e : e?.region;
+          const fromMonth = typeof e === "string" ? null : e?.fromMonth;
+          const when = fromMonth && fromMonth !== ALL_MONTH_LABELS[0] ? ` from ${fromMonth}` : "";
+          return `Withdraw from ${region}${when} (remove ${region} revenue${when ? when : ""}; costs unchanged)`;
+        }),
         lv.wage ? `Wage growth set to FY26 ${lv.wage.fy26}% / FY27 ${lv.wage.fy27}% / FY28 ${lv.wage.fy28}%` : null,
         lv.cpi ? `CPI set to FY26 ${lv.cpi.fy26}% / FY27 ${lv.cpi.fy27}% / FY28 ${lv.cpi.fy28}%` : null,
       ].filter(Boolean);
@@ -9115,7 +9127,9 @@ Return ONLY a JSON array, no markdown, no backticks:
       hires: (lv.hires || []).map(h => ({ id: Math.random().toString(36).slice(2, 7), roleId: h.roleId || "trainer", count: Number(h.count) || 1, startMonth: h.startMonth || ALL_MONTH_LABELS[12], region: h.region || SCENARIO_REGIONS[0], eventType: h.eventType === "departure" ? "departure" : "hire" })),
       wage: lv.wage || null,
       cpi: lv.cpi || null,
-      regionsOff: (lv.regionsOff || []).filter(r => SCENARIO_REGIONS.includes(r)),
+      regionsOff: (lv.regionsOff || [])
+        .map(e => typeof e === "string" ? { region: e, fromMonth: ALL_MONTH_LABELS[0] } : { region: e?.region, fromMonth: e?.fromMonth || ALL_MONTH_LABELS[0] })
+        .filter(e => SCENARIO_REGIONS.includes(e.region)),
     };
     createScenario(scn);
     setSuggestions([]);
@@ -9127,9 +9141,20 @@ Return ONLY a JSON array, no markdown, no backticks:
   const addHire = () => setLevers({ hires: [...(active.levers.hires || []), { id: Math.random().toString(36).slice(2, 7), roleId: "trainer", count: 1, startMonth: ALL_MONTH_LABELS[12], region: SCENARIO_REGIONS[0], eventType: "hire" }] });
   const editLeverRow = (key, id, patch) => setLevers({ [key]: active.levers[key].map(r => r.id === id ? { ...r, ...patch } : r) });
   const removeLeverRow = (key, id) => setLevers({ [key]: active.levers[key].filter(r => r.id !== id) });
+  const regionOffEntry = (region) => (active.levers.regionsOff || []).find(e => (typeof e === "string" ? e : e?.region) === region);
   const toggleRegionOff = (region) => {
     const cur = active.levers.regionsOff || [];
-    setLevers({ regionsOff: cur.includes(region) ? cur.filter(r => r !== region) : [...cur, region] });
+    const exists = cur.some(e => (typeof e === "string" ? e : e?.region) === region);
+    setLevers({ regionsOff: exists
+      ? cur.filter(e => (typeof e === "string" ? e : e?.region) !== region)
+      : [...cur, { region, fromMonth: ALL_MONTH_LABELS[0] }] });
+  };
+  const setRegionOffMonth = (region, fromMonth) => {
+    const cur = active.levers.regionsOff || [];
+    setLevers({ regionsOff: cur.map(e => {
+      const er = typeof e === "string" ? e : e?.region;
+      return er === region ? { region, fromMonth } : (typeof e === "string" ? { region: er, fromMonth: ALL_MONTH_LABELS[0] } : e);
+    }) });
   };
 
   const inputCls = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-violet-400 outline-none bg-white";
@@ -9307,15 +9332,25 @@ Return ONLY a JSON array, no markdown, no backticks:
                 {/* Region withdrawal */}
                 <div className="pt-1 border-t border-slate-50">
                   <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mt-3 mb-2"><PieChart size={13} className="text-rose-500" />Region withdrawal</p>
-                  <p className="text-[11px] text-slate-400 mb-2">Toggle a region to remove all its revenue (e.g. exiting EP). Costs stay — the coverage analyser below shows what's left to cover.</p>
-                  <div className="flex flex-wrap gap-1.5">
+                  <p className="text-[11px] text-slate-400 mb-2">Toggle a region to remove its revenue, then pick the month it exits from (e.g. EP winds down from Jan-27). Months before the exit keep their baseline; costs stay — the coverage analyser below shows what's left to cover.</p>
+                  <div className="flex flex-wrap gap-2">
                     {SCENARIO_REGIONS.map(r => {
-                      const off = (active.levers.regionsOff || []).includes(r);
+                      const entry = regionOffEntry(r);
+                      const off = !!entry;
+                      const fromMonth = off ? (typeof entry === "string" ? ALL_MONTH_LABELS[0] : (entry.fromMonth || ALL_MONTH_LABELS[0])) : null;
                       return (
-                        <button key={r} onClick={() => toggleRegionOff(r)}
-                          className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-colors ${off ? "bg-rose-500 border-rose-500 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-rose-300"}`}>
-                          {off ? `${r} ✕` : r}
-                        </button>
+                        <div key={r} className={`flex items-center gap-1 rounded-lg ${off ? "bg-rose-50 border border-rose-100 pr-1" : ""}`}>
+                          <button onClick={() => toggleRegionOff(r)}
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-colors ${off ? "bg-rose-500 border-rose-500 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-rose-300"}`}>
+                            {off ? `${r} ✕` : r}
+                          </button>
+                          {off && (
+                            <select value={fromMonth} onChange={e => setRegionOffMonth(r, e.target.value)} title="Withdraw from this month onward"
+                              className="border border-rose-200 rounded-md px-1.5 py-1 text-[11px] bg-white text-rose-700 focus:ring-2 focus:ring-rose-300 outline-none">
+                              {ALL_MONTH_LABELS.map((m, i) => <option key={m} value={m}>{i === 0 ? `entire horizon` : `from ${m}`}</option>)}
+                            </select>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
