@@ -8550,7 +8550,7 @@ function makeScenario(name) {
     name: name || "Untitled scenario",
     notes: "",
     createdAt: new Date().toISOString(),
-    levers: { costCuts: [], unitUplift: [], hires: [], wage: null, cpi: null },
+    levers: { costCuts: [], unitUplift: [], hires: [], wage: null, cpi: null, regionsOff: [] },
   };
 }
 
@@ -8610,6 +8610,17 @@ function computeScenarioData(scenario, base) {
     });
   });
 
+  // 2b. Region withdrawal → zero out a region's units (and therefore revenue)
+  //     entirely, modelling exiting that market. Costs are intentionally left
+  //     untouched — that gap is the whole point of the coverage analysis.
+  (lv.regionsOff || []).forEach(region => {
+    const courses = UNIT_ASSUMPTIONS_FY26[region];
+    if (!courses) return;
+    Object.keys(courses).forEach(code => {
+      MONTH_SCHEDULE.forEach(({ label }) => { units[`${region}|${code}|${label}`] = 0; });
+    });
+  });
+
   // 3. Extra hires / departures → treated as "filled" within the scenario only.
   const hires = [
     ...(base.filledHires || []),
@@ -8637,7 +8648,7 @@ function scenarioKpis(data, horizon) {
 function leverCount(scenario) {
   const lv = scenario?.levers || {};
   return (lv.costCuts?.length || 0) + (lv.unitUplift?.length || 0) + (lv.hires?.length || 0)
-    + (lv.wage ? 1 : 0) + (lv.cpi ? 1 : 0);
+    + (lv.regionsOff?.length || 0) + (lv.wage ? 1 : 0) + (lv.cpi ? 1 : 0);
 }
 
 // Small comparison KPI card: baseline → scenario with a coloured delta.
@@ -8658,6 +8669,229 @@ function ScenarioKpiCard({ title, baseVal, scnVal, goodWhenUp = true }) {
           {Icon && <Icon size={11} />}
           {delta >= 0 ? "+" : ""}{fmtAUD(delta, true)} ({pct >= 0 ? "+" : ""}{pct.toFixed(1)}%)
         </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── BREAK-EVEN & COST-COVERAGE ANALYSER ─────────────────────────────────────
+// Given the active scenario's computed financials, work out — over a single FY
+// (or all years) — whether revenue covers cost, when it breaks even, and what
+// sales the *active* (non-withdrawn) regions would each need to fully cover cost.
+// The required revenue is distributed across regions in proportion to their own
+// scenario revenue, with an optional per-region weighting (e.g. push +15% onto
+// NSW), then converted to units (at each region's realised $/unit) and to
+// student head-count (at an editable units-per-student ratio). This is the
+// EP-withdrawal / cost-coverage / student-numbers workflow made repeatable.
+const COVERAGE_HORIZONS = ["FY26", "FY27", "FY28", "All"];
+
+function CoverageAnalyser({ scnData, baseData }) {
+  const [hz, setHz] = useState("FY27");
+  const [unitsPerStudent, setUnitsPerStudent] = useState(13);
+  const [weights, setWeights] = useState({}); // region -> multiplier (default 1)
+
+  const cov = useMemo(() => {
+    if (!scnData) return null;
+    const inHz = (fy) => hz === "All" || hz === fy;
+
+    // Horizon cost base (this is the coverage / break-even target) and revenue.
+    let totalCost = 0, totalRev = 0;
+    scnData.operationalFinancials.forEach(op => {
+      if (!inHz(op.fy)) return;
+      totalCost += op.payments; totalRev += op.revenue;
+    });
+
+    // Per-region revenue + units over the horizon, from the scenario itself.
+    // Withdrawn regions fall out automatically (their revenue is zeroed).
+    const regions = scnData.regions.map(r => {
+      let rev = 0, units = 0;
+      r.monthlyData.forEach(m => { if (inHz(m.fy)) { rev += m.revenue; units += m.units; } });
+      return { region: r.region, rev, units, avgUnitValue: units > 0 ? rev / units : 0 };
+    }).filter(r => r.rev > 0);
+
+    const requiredRevenue = totalCost; // full cost coverage = break-even
+    const weighted = regions.map(r => ({ ...r, weight: Number(weights[r.region]) || 1 }));
+    const notional = weighted.reduce((s, r) => s + r.rev * r.weight, 0);
+    const scale = notional > 0 ? requiredRevenue / notional : 0;
+
+    const dist = weighted.map(r => {
+      const targetRev = r.rev * r.weight * scale;
+      const reqUnits = r.avgUnitValue > 0 ? targetRev / r.avgUnitValue : 0;
+      const students = unitsPerStudent > 0 ? reqUnits / unitsPerStudent : 0;
+      const upliftPct = r.rev > 0 ? (targetRev / r.rev - 1) * 100 : 0;
+      return { ...r, targetRev, reqUnits, students, upliftPct };
+    }).sort((a, b) => b.targetRev - a.targetRev);
+
+    const totals = dist.reduce((a, r) => ({
+      targetRev: a.targetRev + r.targetRev,
+      reqUnits: a.reqUnits + r.reqUnits,
+      students: a.students + r.students,
+    }), { targetRev: 0, reqUnits: 0, students: 0 });
+
+    return { totalCost, totalRev, requiredRevenue, dist, totals, surplus: totalRev - totalCost };
+  }, [scnData, hz, weights, unitsPerStudent]);
+
+  // Cumulative revenue vs cost over the horizon → break-even crossover.
+  const beChart = useMemo(() => {
+    if (!scnData) return { data: [], breakEvenMonth: null };
+    const inHz = (fy) => hz === "All" || hz === fy;
+    let cumCost = 0, cumRev = 0, breakEvenMonth = null;
+    const data = scnData.operationalFinancials.filter(op => inHz(op.fy)).map(op => {
+      cumRev += op.revenue; cumCost += op.payments;
+      if (breakEvenMonth === null && cumRev >= cumCost) breakEvenMonth = op.month;
+      return { month: op.month, "Cumulative revenue": Math.round(cumRev), "Cumulative cost": Math.round(cumCost) };
+    });
+    return { data, breakEvenMonth };
+  }, [scnData, hz]);
+
+  if (!cov) return null;
+  const covered = cov.surplus >= 0;
+  const topRegion = cov.dist[0];
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+      <div className="px-5 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Scale size={15} className="text-violet-500" />
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Break-even &amp; cost coverage</h3>
+            <p className="text-[10px] text-slate-400">What sales each remaining region needs to cover cost — with this scenario's levers applied</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+            {COVERAGE_HORIZONS.map(h => (
+              <button key={h} onClick={() => setHz(h)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all ${hz === h ? "bg-white text-violet-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{h === "All" ? "All" : h}</button>
+            ))}
+          </div>
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-500">
+            Units / student
+            <input type="number" min="1" value={unitsPerStudent} onChange={e => setUnitsPerStudent(Number(e.target.value) || 1)}
+              className="border border-slate-200 rounded-lg px-2 py-1 text-xs w-14 text-center focus:ring-2 focus:ring-violet-400 outline-none" />
+          </label>
+        </div>
+      </div>
+
+      <div className="p-5 space-y-5">
+        {/* Headline coverage cards */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="bg-slate-50 rounded-xl border border-slate-100 p-4">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost to cover ({hz})</p>
+            <p className="text-xl font-bold text-slate-800 mt-1">{fmtAUD(cov.totalCost, false)}</p>
+            <p className="text-[10px] text-slate-400 mt-0.5">scenario revenue {fmtAUD(cov.totalRev, true)}</p>
+          </div>
+          <div className={`rounded-xl border p-4 ${covered ? "bg-emerald-50 border-emerald-100" : "bg-rose-50 border-rose-100"}`}>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{covered ? "Surplus" : "Shortfall"}</p>
+            <p className={`text-xl font-bold mt-1 ${covered ? "text-emerald-700" : "text-rose-600"}`}>{fmtAUD(Math.abs(cov.surplus), false)}</p>
+            <p className="text-[10px] text-slate-400 mt-0.5">{covered ? "revenue exceeds cost" : "extra sales required"}</p>
+          </div>
+          <div className={`rounded-xl border p-4 ${beChart.breakEvenMonth ? "bg-white border-slate-100" : "bg-amber-50 border-amber-100"}`}>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Break-even</p>
+            <p className={`text-xl font-bold mt-1 ${beChart.breakEvenMonth ? "text-slate-800" : "text-amber-600"}`}>{beChart.breakEvenMonth || `Not in ${hz}`}</p>
+            <p className="text-[10px] text-slate-400 mt-0.5">cumulative rev ≥ cost</p>
+          </div>
+          <div className="bg-gradient-to-br from-violet-600 to-indigo-700 rounded-xl p-4 text-white shadow-sm">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-violet-200">Students to cover cost</p>
+            <p className="text-3xl font-black mt-1">{Math.round(cov.totals.students).toLocaleString()}</p>
+            <p className="text-[10px] text-violet-200 mt-0.5">{Math.round(cov.totals.reqUnits).toLocaleString()} units · {cov.dist.length} active region{cov.dist.length === 1 ? "" : "s"}</p>
+          </div>
+        </div>
+
+        {/* Break-even chart */}
+        <div>
+          <p className="text-xs font-bold text-slate-700 mb-2">Cumulative revenue vs cost — {hz}</p>
+          <ResponsiveContainer width="100%" height={210}>
+            <LineChart data={beChart.data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+              <XAxis dataKey="month" tick={{ fontSize: 10 }} interval={Math.max(0, Math.floor(beChart.data.length / 12))} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={v => fmtAUD(v, true)} width={50} />
+              <Tooltip formatter={v => fmtAUD(Number(v), false)} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {beChart.breakEvenMonth && <ReferenceLine x={beChart.breakEvenMonth} stroke="#10b981" strokeDasharray="4 4" label={{ value: "break-even", fontSize: 9, fill: "#059669", position: "top" }} />}
+              <Line type="monotone" dataKey="Cumulative revenue" stroke="#7c3aed" strokeWidth={2.5} dot={false} />
+              <Line type="monotone" dataKey="Cumulative cost" stroke="#ef4444" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Required sales by region */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-bold text-slate-700">Required sales to cover cost, by region</p>
+            <p className="text-[10px] text-slate-400">Set a weight &gt; 1 to load more onto a region (e.g. 1.15 = +15%)</p>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={cov.dist.map(r => ({ region: r.region, Students: Math.round(r.students) }))} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+              <XAxis dataKey="region" tick={{ fontSize: 10 }} />
+              <YAxis tick={{ fontSize: 10 }} width={40} />
+              <Tooltip formatter={v => `${Number(v).toLocaleString()} students`} />
+              <Bar dataKey="Students" fill="#7c3aed" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+
+          <div className="overflow-x-auto mt-2">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 text-left font-semibold">Region</th>
+                  <th className="px-3 py-2 text-right font-semibold" title="Scenario revenue this horizon">Scenario rev</th>
+                  <th className="px-3 py-2 text-right font-semibold" title="Realised revenue ÷ units">$/unit</th>
+                  <th className="px-3 py-2 text-center font-semibold" title="Weighting multiplier on this region's share">Weight</th>
+                  <th className="px-3 py-2 text-right font-semibold">Target rev</th>
+                  <th className="px-3 py-2 text-right font-semibold">vs base</th>
+                  <th className="px-3 py-2 text-right font-semibold">Units</th>
+                  <th className="px-3 py-2 text-right font-semibold">Students</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cov.dist.map(r => (
+                  <tr key={r.region} className="border-t border-slate-100">
+                    <td className="px-3 py-1.5 font-bold text-slate-700">{r.region}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-slate-500">{fmtAUD(r.rev, true)}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-slate-500">${Math.round(r.avgUnitValue)}</td>
+                    <td className="px-3 py-1.5 text-center">
+                      <input type="number" min="0" step="0.05" value={weights[r.region] ?? 1}
+                        onChange={e => setWeights(w => ({ ...w, [r.region]: Number(e.target.value) }))}
+                        className="border border-slate-200 rounded-lg px-2 py-1 text-xs w-16 text-center focus:ring-2 focus:ring-violet-400 outline-none" />
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono font-bold text-emerald-600">{fmtAUD(r.targetRev, false)}</td>
+                    <td className={`px-3 py-1.5 text-right font-mono ${r.upliftPct >= 0 ? "text-slate-500" : "text-rose-500"}`}>{r.upliftPct >= 0 ? "+" : ""}{r.upliftPct.toFixed(0)}%</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-slate-600">{Math.round(r.reqUnits).toLocaleString()}</td>
+                    <td className="px-3 py-1.5 text-right font-mono font-bold text-violet-700">{Math.round(r.students).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-700">
+                  <td className="px-3 py-2">Total</td>
+                  <td className="px-3 py-2 text-right font-mono">{fmtAUD(cov.dist.reduce((s, r) => s + r.rev, 0), true)}</td>
+                  <td></td><td></td>
+                  <td className="px-3 py-2 text-right font-mono text-emerald-700">{fmtAUD(cov.totals.targetRev, false)}</td>
+                  <td></td>
+                  <td className="px-3 py-2 text-right font-mono">{Math.round(cov.totals.reqUnits).toLocaleString()}</td>
+                  <td className="px-3 py-2 text-right font-mono text-violet-700">{Math.round(cov.totals.students).toLocaleString()}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+        {/* Plain-language insights */}
+        <div className="bg-violet-50 border border-violet-100 rounded-xl p-4">
+          <p className="text-xs font-bold text-violet-700 mb-1.5 flex items-center gap-1.5"><Sparkles size={12} />What this means</p>
+          <ul className="space-y-1 text-[11px] text-slate-600">
+            <li className="flex items-start gap-1.5"><ChevronRight size={11} className="shrink-0 mt-0.5 text-violet-300" />
+              Over {hz}, this scenario {covered ? <span className="text-emerald-700 font-semibold">covers its cost base with a {fmtAUD(cov.surplus, true)} surplus</span> : <span className="text-rose-600 font-semibold">falls {fmtAUD(-cov.surplus, true)} short of covering cost</span>}.</li>
+            <li className="flex items-start gap-1.5"><ChevronRight size={11} className="shrink-0 mt-0.5 text-violet-300" />
+              Full cost coverage needs {fmtAUD(cov.requiredRevenue, true)} of sales ≈ <span className="font-semibold">{Math.round(cov.totals.students).toLocaleString()} students</span> ({Math.round(cov.totals.reqUnits).toLocaleString()} units at {unitsPerStudent} units/student) across {cov.dist.length} active region{cov.dist.length === 1 ? "" : "s"}.</li>
+            {topRegion && <li className="flex items-start gap-1.5"><ChevronRight size={11} className="shrink-0 mt-0.5 text-violet-300" />
+              {topRegion.region} carries the largest load at {Math.round(topRegion.students).toLocaleString()} students ({fmtAUD(topRegion.targetRev, true)}).</li>}
+            <li className="flex items-start gap-1.5"><ChevronRight size={11} className="shrink-0 mt-0.5 text-violet-300" />
+              Withdraw a region with the <span className="font-semibold">Region withdrawal</span> lever above to redistribute the same cost base over fewer regions.</li>
+          </ul>
+        </div>
       </div>
     </div>
   );
@@ -8789,6 +9023,7 @@ function ScenarioLab({ base, baseData, currentUser }) {
         ...(lv.costCuts || []).map(c => `Cut ${c.target} by ${c.pct}% (${c.fy})`),
         ...(lv.unitUplift || []).map(u => `Increase program volume ${u.region === "All" ? "across all regions" : "in " + u.region} by ${u.pct}%`),
         ...(lv.hires || []).map(h => `${h.eventType === "departure" ? "Remove" : "Add"} ${h.count}× ${STAFF_ROLES.find(r => r.id === h.roleId)?.label || h.roleId} in ${h.region} from ${h.startMonth}`),
+        ...(lv.regionsOff || []).map(r => `Withdraw from ${r} (remove all ${r} revenue; costs unchanged)`),
         lv.wage ? `Wage growth set to FY26 ${lv.wage.fy26}% / FY27 ${lv.wage.fy27}% / FY28 ${lv.wage.fy28}%` : null,
         lv.cpi ? `CPI set to FY26 ${lv.cpi.fy26}% / FY27 ${lv.cpi.fy27}% / FY28 ${lv.cpi.fy28}%` : null,
       ].filter(Boolean);
@@ -8880,6 +9115,7 @@ Return ONLY a JSON array, no markdown, no backticks:
       hires: (lv.hires || []).map(h => ({ id: Math.random().toString(36).slice(2, 7), roleId: h.roleId || "trainer", count: Number(h.count) || 1, startMonth: h.startMonth || ALL_MONTH_LABELS[12], region: h.region || SCENARIO_REGIONS[0], eventType: h.eventType === "departure" ? "departure" : "hire" })),
       wage: lv.wage || null,
       cpi: lv.cpi || null,
+      regionsOff: (lv.regionsOff || []).filter(r => SCENARIO_REGIONS.includes(r)),
     };
     createScenario(scn);
     setSuggestions([]);
@@ -8891,6 +9127,10 @@ Return ONLY a JSON array, no markdown, no backticks:
   const addHire = () => setLevers({ hires: [...(active.levers.hires || []), { id: Math.random().toString(36).slice(2, 7), roleId: "trainer", count: 1, startMonth: ALL_MONTH_LABELS[12], region: SCENARIO_REGIONS[0], eventType: "hire" }] });
   const editLeverRow = (key, id, patch) => setLevers({ [key]: active.levers[key].map(r => r.id === id ? { ...r, ...patch } : r) });
   const removeLeverRow = (key, id) => setLevers({ [key]: active.levers[key].filter(r => r.id !== id) });
+  const toggleRegionOff = (region) => {
+    const cur = active.levers.regionsOff || [];
+    setLevers({ regionsOff: cur.includes(region) ? cur.filter(r => r !== region) : [...cur, region] });
+  };
 
   const inputCls = "border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-violet-400 outline-none bg-white";
 
@@ -9064,6 +9304,23 @@ Return ONLY a JSON array, no markdown, no backticks:
                   </div>
                 </div>
 
+                {/* Region withdrawal */}
+                <div className="pt-1 border-t border-slate-50">
+                  <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mt-3 mb-2"><PieChart size={13} className="text-rose-500" />Region withdrawal</p>
+                  <p className="text-[11px] text-slate-400 mb-2">Toggle a region to remove all its revenue (e.g. exiting EP). Costs stay — the coverage analyser below shows what's left to cover.</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SCENARIO_REGIONS.map(r => {
+                      const off = (active.levers.regionsOff || []).includes(r);
+                      return (
+                        <button key={r} onClick={() => toggleRegionOff(r)}
+                          className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg border transition-colors ${off ? "bg-rose-500 border-rose-500 text-white" : "bg-white border-slate-200 text-slate-600 hover:border-rose-300"}`}>
+                          {off ? `${r} ✕` : r}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Assumptions: wage + CPI */}
                 <div className="pt-1 border-t border-slate-50">
                   <p className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mt-3 mb-2"><Activity size={13} className="text-amber-500" />Assumption overrides</p>
@@ -9092,6 +9349,9 @@ Return ONLY a JSON array, no markdown, no backticks:
                 </div>
               </div>
             </div>
+
+            {/* ── Break-even & cost coverage ──────────────────────────────────── */}
+            {scnData && <CoverageAnalyser scnData={scnData} baseData={baseData} />}
 
             {/* ── AI analysis ─────────────────────────────────────────────────── */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
