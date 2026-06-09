@@ -9020,6 +9020,20 @@ function ScenarioLab({ base, baseData, currentUser }) {
       .filter(Boolean);
   }, [scnData, baseData, horizon]);
 
+  // Gradient split offsets so each cash line is its normal colour above $0 and
+  // red below it. Offset is the fraction of the line's own min→max box where 0
+  // falls (recharts gradients are relative to the path's bounding box).
+  const cashSplit = useMemo(() => {
+    const off = (vals) => {
+      if (!vals.length) return 1;
+      const max = Math.max(...vals), min = Math.min(...vals);
+      if (max <= 0) return 0; // entirely at/below zero → all red
+      if (min >= 0) return 1; // entirely at/above zero → all normal
+      return max / (max - min);
+    };
+    return { baseline: off(chartData.map(d => d.Baseline)), scenario: off(chartData.map(d => d.Scenario)) };
+  }, [chartData]);
+
   // ── AI: analyse the active scenario ───────────────────────────────────────────
   const analyseScenario = async () => {
     if (!active || !scnK) return;
@@ -9229,13 +9243,28 @@ Return ONLY a JSON array, no markdown, no backticks:
               <p className="text-xs font-bold text-slate-700 mb-3 flex items-center gap-1.5"><Scale size={13} className="text-violet-500" />Closing cash balance — baseline vs scenario</p>
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="cashSplitBaseline" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset={cashSplit.baseline} stopColor="#94a3b8" />
+                      <stop offset={cashSplit.baseline} stopColor="#ef4444" />
+                    </linearGradient>
+                    <linearGradient id="cashSplitScenario" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset={cashSplit.scenario} stopColor="#7c3aed" />
+                      <stop offset={cashSplit.scenario} stopColor="#ef4444" />
+                    </linearGradient>
+                  </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="month" tick={{ fontSize: 10 }} interval={Math.max(0, Math.floor(chartData.length / 12))} />
                   <YAxis tick={{ fontSize: 10 }} tickFormatter={v => fmtAUD(v, true)} width={50} />
                   <Tooltip formatter={v => fmtAUD(Number(v), false)} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line type="monotone" dataKey="Baseline" stroke="#94a3b8" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="Scenario" stroke="#7c3aed" strokeWidth={2.5} dot={false} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} payload={[
+                    { value: "Baseline", type: "line", color: "#94a3b8" },
+                    { value: "Scenario", type: "line", color: "#7c3aed" },
+                    { value: "Cash negative", type: "line", color: "#ef4444" },
+                  ]} />
+                  <ReferenceLine y={0} stroke="#475569" strokeDasharray="4 4" label={{ value: "$0", fontSize: 9, fill: "#475569", position: "insideLeft" }} />
+                  <Line type="monotone" dataKey="Baseline" stroke="url(#cashSplitBaseline)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="Scenario" stroke="url(#cashSplitScenario)" strokeWidth={2.5} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
