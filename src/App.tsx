@@ -10395,10 +10395,42 @@ export default function App() {
           const savedCpi = localStorage.getItem("applied_cpi_settings");
           if (savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
         }
-        // Load uploaded Xero P&L actuals from localStorage (no Supabase table yet)
-        const savedXero = localStorage.getItem("xero_actuals");
-        if (savedXero) {
-          try { setXeroActuals(JSON.parse(savedXero)); console.log("✓ Loaded Xero P&L actuals from localStorage"); } catch {}
+        // Load uploaded Xero P&L actuals. Supabase is the shared source of truth
+        // (one org-wide `xero_actuals` row) so every login sees the same numbers.
+        // Reconciled against localStorage exactly like unit adjustments: a machine
+        // that uploaded while offline / before the DB round-tripped isn't lost —
+        // its unsynced upload is recovered and pushed back up. If the table is
+        // absent (sbGet → null), we degrade to the localStorage-only behaviour.
+        try {
+          const xeroRows = await sbGet("xero_actuals");
+          const sbXeroRow = Array.isArray(xeroRows) ? xeroRows.find(r => r.id === "shared") : null;
+          let sbXeroPayload = null;
+          if (sbXeroRow?.data) { try { sbXeroPayload = JSON.parse(sbXeroRow.data); } catch {} }
+
+          let lsXero = null;
+          try { const raw = localStorage.getItem("xero_actuals"); lsXero = raw ? JSON.parse(raw) : null; } catch { /* ignore malformed cache */ }
+          const xLsTs = localStorage.getItem("xero_actuals_ts");
+          const xSyncedTs = localStorage.getItem("xero_actuals_synced_ts");
+          const xHasUnsyncedLocal = lsXero && xLsTs && (!xSyncedTs || xLsTs > xSyncedTs);
+
+          if (xHasUnsyncedLocal) {
+            setXeroActuals(lsXero);
+            console.warn("⚠ Xero actuals: local upload newer than the last DB sync — recovering it and re-syncing to Supabase.");
+            const now = new Date().toISOString();
+            const ok = await sbUpsert("xero_actuals", [{ id: "shared", data: JSON.stringify(lsXero), user_email: currentUser?.email || "unknown", updated_at: now }]);
+            if (ok) localStorage.setItem("xero_actuals_synced_ts", now);
+          } else if (sbXeroPayload) {
+            setXeroActuals(sbXeroPayload);
+            localStorage.setItem("xero_actuals", JSON.stringify(sbXeroPayload));
+            console.log("✓ Loaded Xero P&L actuals from Supabase (shared)");
+          } else if (lsXero) {
+            setXeroActuals(lsXero);
+            console.log("✓ Xero P&L actuals loaded from localStorage fallback");
+          }
+        } catch (xe) {
+          console.warn("Xero actuals load failed, using localStorage fallback:", xe);
+          const savedXero = localStorage.getItem("xero_actuals");
+          if (savedXero) { try { setXeroActuals(JSON.parse(savedXero)); } catch {} }
         }
         setSupaStatus("connected");
       } catch(e) {
@@ -10492,12 +10524,23 @@ export default function App() {
 
   const handleUpdateXeroActuals = (payload) => {
     setXeroActuals(payload);
+    const ts = new Date().toISOString();
     if (payload === null) {
       localStorage.removeItem("xero_actuals");
+      localStorage.removeItem("xero_actuals_ts");
+      localStorage.removeItem("xero_actuals_synced_ts");
       sbAudit(currentUser, "CLEAR", "XERO_PNL", "Reverted to baseline actuals");
+      // Clear the shared row so every other login also reverts to baseline.
+      sbDelete("xero_actuals", { id: "shared" }).catch(e => console.warn("Xero clear remote sync failed:", e));
     } else {
       localStorage.setItem("xero_actuals", JSON.stringify(payload));
+      localStorage.setItem("xero_actuals_ts", ts);
       sbAudit(currentUser, "UPLOAD", "XERO_PNL", `${payload.fileName} · ${payload.actualMks?.length || 0} months · through ${payload.cutoffMk || "?"}`);
+      // Push to the shared org-wide row so all logins compute the same numbers.
+      // Only advance the synced marker on success, so a failed save stays "unsynced"
+      // and gets recovered + retried on the next load (see loadData reconciliation).
+      sbUpsert("xero_actuals", [{ id: "shared", data: JSON.stringify(payload), user_email: currentUser?.email || "unknown", updated_at: ts }])
+        .then(ok => { if (ok) localStorage.setItem("xero_actuals_synced_ts", ts); else console.error("xero_actuals save to Supabase failed"); });
     }
   };
 
