@@ -4760,12 +4760,12 @@ function AuditLogView({ currentUser }) {
 
 
 // ─── AI FEATURE CONSTANTS ─────────────────────────────────────────────────────
-// Route through /api/gemini proxy when running on Vercel (any non-localhost domain)
-// Falls back to direct call on localhost/StackBlitz dev environments
-const IS_PROD = typeof window !== "undefined" && !window.location.hostname.includes("localhost") && !window.location.hostname.includes("stackblitz") && !window.location.hostname.includes("webcontainer");
-const GEMINI_BASE = IS_PROD
-  ? "/api/gemini"
-  : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
+// Always call the server-side /api/gemini proxy — the API key lives only in the
+// server env (GEMINI_API_KEY) and must never reach the browser. Previously this
+// fell back to a direct generativelanguage.googleapis.com call that interpolated
+// VITE_GEMINI_API_KEY into the client URL, which baked the key into the public
+// bundle. For local dev, run the proxy (e.g. `vercel dev`) so this path works too.
+const GEMINI_BASE = "/api/gemini";
 
 async function callGemini(prompt, systemPrompt = "", maxTokens = 4096) {
   const body = {
@@ -5669,10 +5669,8 @@ function AnomalyPanel({ anomalies, anomalyStatus, lastScanned, onRescan, current
 }
 
 // ─── GEMINI AI ASSISTANT ───────────────────────────────────────────────────────
-// GeminiAssistant reuses the same IS_PROD + proxy logic defined above
-const GEMINI_URL = IS_PROD
-  ? "/api/gemini"
-  : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY || ""}`;
+// GeminiAssistant reuses the same server-side proxy (see GEMINI_BASE above).
+const GEMINI_URL = GEMINI_BASE;
 
 function GeminiAssistant({ data, coaAdjustments, hiringEvents, filledHires, currentUser, xeroActuals = null }) {
   const [open, setOpen] = useState(false);
