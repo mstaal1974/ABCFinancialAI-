@@ -45,6 +45,30 @@ create table if not exists public.user_roles (
   updated_at timestamptz not null default now()
 );
 
+-- ── 2. is_admin() helper ────────────────────────────────────────────────────
+-- MUST be defined before any policy references it: `language sql` bodies are
+-- validated at creation, so both this function (which reads user_roles) and the
+-- policies below (which call this function) require their dependencies to already
+-- exist. Order is therefore: table → function → policies. SECURITY DEFINER lets
+-- it read user_roles without being subject to RLS (avoids policy recursion); the
+-- fixed search_path prevents search-path hijacking.
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.user_roles
+    where user_id = auth.uid() and role = 'admin'
+  );
+$$;
+
+revoke all on function public.is_admin() from public;
+grant execute on function public.is_admin() to authenticated;
+
+-- ── 3. user_roles RLS policies (now that is_admin() exists) ──────────────────
 alter table public.user_roles enable row level security;
 
 -- A user may read their OWN role row (the client calls this to decide UI gating).
@@ -64,26 +88,7 @@ create policy "user_roles_admin_write"
   on public.user_roles for all to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
--- ── 2. is_admin() helper ────────────────────────────────────────────────────
--- SECURITY DEFINER so it reads user_roles without being subject to RLS (avoids
--- policy recursion). Fixed search_path to prevent search-path hijacking.
-create or replace function public.is_admin()
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1 from public.user_roles
-    where user_id = auth.uid() and role = 'admin'
-  );
-$$;
-
-revoke all on function public.is_admin() from public;
-grant execute on function public.is_admin() to authenticated;
-
--- ── 3. Bootstrap the first admin ────────────────────────────────────────────
+-- ── 4. Bootstrap the first admin ────────────────────────────────────────────
 -- Roles default to 'member', so nobody is admin until you set one. Run this once
 -- with the email of your platform administrator (find the uuid in Auth → Users):
 --
@@ -93,7 +98,7 @@ grant execute on function public.is_admin() to authenticated;
 --
 -- Thereafter admins manage roles via the user_roles_admin_write policy.
 
--- ── 4. Core financial tables ────────────────────────────────────────────────
+-- ── 5. Core financial tables ────────────────────────────────────────────────
 -- `create table if not exists` is a no-op on your existing production tables
 -- (it will NOT alter columns) — it only helps fresh/local installs. The column
 -- shapes below are inferred from the app code; reconcile them against your live
@@ -151,7 +156,7 @@ end $$;
 -- users to match the app's current staffing views. If salary figures must be
 -- confidential, change its _read policy to `using (public.is_admin())`.
 
--- ── 5. Audit log — append-only + server-stamped actor ───────────────────────
+-- ── 6. Audit log — append-only + server-stamped actor ───────────────────────
 -- The audit trail must be tamper-resistant: any authenticated user may INSERT
 -- (their actions get logged) and SELECT (read history), but UPDATE is forbidden
 -- and DELETE is admin-only. A trigger overrides the client-supplied actor and
