@@ -18,12 +18,21 @@ create table if not exists public.xero_actuals (
   updated_at  timestamptz not null default now()
 );
 
+-- Row-level security. Requires public.is_admin() — run db/roles_and_rls.sql first.
+-- The uploaded Xero actuals are org-wide company financials that override
+-- budgeted revenue/costs for everyone, so: any authenticated user may READ them,
+-- but only admins may upload/overwrite/clear the shared row. This matches the
+-- UI, which gates the upload/revert controls behind the admin role.
 alter table public.xero_actuals enable row level security;
 
-drop policy if exists "xero_actuals_authenticated_all" on public.xero_actuals;
-create policy "xero_actuals_authenticated_all"
-  on public.xero_actuals
-  for all
-  to authenticated
-  using (true)
-  with check (true);
+drop policy if exists "xero_actuals_authenticated_all" on public.xero_actuals;  -- old blanket using(true)
+drop policy if exists "xero_actuals_read"  on public.xero_actuals;
+drop policy if exists "xero_actuals_write" on public.xero_actuals;
+
+create policy "xero_actuals_read"
+  on public.xero_actuals for select to authenticated
+  using (true);
+create policy "xero_actuals_write"
+  on public.xero_actuals for all to authenticated
+  using (public.is_admin())
+  with check (public.is_admin());
