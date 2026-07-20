@@ -176,6 +176,26 @@ async function sbAudit(user, action, entity, detail, oldVal = null, newVal = nul
   } catch(e) { console.warn("Audit log failed:", e); }
 }
 
+// ── Role lookup ───────────────────────────────────────────────────────────────
+// Reads the caller's platform role from the `user_roles` table (keyed by the
+// Supabase auth uid). Returns "admin" | "member". Defaults to "member" (least
+// privilege) when the table is absent, the user has no row, or the request
+// fails — so a missing/misconfigured role can never grant admin. This is a
+// convenience/UX signal only; the authoritative enforcement is the Postgres RLS
+// policies (see db/roles_and_rls.sql), which the browser cannot bypass.
+async function sbGetMyRole(userId) {
+  if (!userId) return "member";
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/user_roles?select=role&user_id=eq.${encodeURIComponent(userId)}`,
+      { headers: getAuthHeaders() }
+    );
+    if (!r.ok) return "member";
+    const rows = await r.json();
+    return (Array.isArray(rows) && rows[0]?.role === "admin") ? "admin" : "member";
+  } catch { return "member"; }
+}
+
 // ─── DATA HELPERS ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -4339,7 +4359,7 @@ Find 3-7 realistic, actionable issues. Prioritise high-impact improvements.`;
 // the audit log. For every cell edited AFTER the cutoff, the value it had AT the
 // cutoff is the `old_value` of that cell's FIRST edit after the cutoff. Cells not
 // touched after the cutoff are already correct and left alone.
-function RestorePanel({ currentUser }) {
+function RestorePanel({ currentUser, isAdmin }) {
   const [cutoff, setCutoff] = useState("");
   const [phase, setPhase] = useState("idle"); // idle | loading | ready | applying | done | error
   const [plan, setPlan] = useState(null);
@@ -4466,6 +4486,23 @@ function RestorePanel({ currentUser }) {
 
   const changeCount = plan ? plan.restores.length + plan.deletes.length : 0;
 
+  // Point-in-time restore mass-rewrites the shared Unit Modeller data for the whole
+  // org — an administrator-only operation. Non-admins see a read-only notice; the
+  // Postgres RLS policies are what actually block the writes server-side.
+  if (!isAdmin) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <div className="p-2 rounded-lg bg-slate-300 text-white shrink-0"><Lock size={16}/></div>
+          <div>
+            <h2 className="text-base font-bold text-slate-800">Restore to a point in time</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Administrator only — you have read-only access to the audit history below.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
@@ -4565,7 +4602,7 @@ function RestorePanel({ currentUser }) {
   );
 }
 
-function AuditLogView({ currentUser }) {
+function AuditLogView({ currentUser, isAdmin }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ entity: "all", action: "all", user: "all", search: "" });
@@ -4630,7 +4667,7 @@ function AuditLogView({ currentUser }) {
   return (
     <div className="space-y-5">
       {/* Point-in-time restore */}
-      <RestorePanel currentUser={currentUser}/>
+      <RestorePanel currentUser={currentUser} isAdmin={isAdmin}/>
 
       {/* Header */}
       <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-100">
@@ -8019,7 +8056,7 @@ async function parseXeroPnLXlsx(arrayBuffer) {
 }
 
 
-function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroActuals }) {
+function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroActuals, isAdmin }) {
   const [activeFY,    setActiveFY]    = useState("FY26");
   const [viewMode,    setViewMode]    = useState("monthly"); // monthly | ytd | full_year
   const [expandedSections, setExpandedSections] = useState({ "Direct Costs": true, "Overheads": true });
@@ -8242,21 +8279,28 @@ function BudgetActualsPnLView({ data, coaAdjustments, xeroActuals, onUpdateXeroA
               Revenue performance and the cash flow chain update automatically; future months stay on the unit model.
             </p>
           </div>
-          {xeroActuals && (
+          {xeroActuals && isAdmin && (
             <button onClick={clearXeroUpload}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600 transition-all">
               Revert to baseline
             </button>
           )}
         </div>
+        {!isAdmin && (
+          <p className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+            <Lock size={12} className="text-slate-400 shrink-0"/>
+            Uploading or reverting the shared Xero actuals is an administrator-only action. You can view the figures below.
+          </p>
+        )}
         <div
-          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragOver={e => { if (!isAdmin) return; e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
-          onDrop={onXeroDrop}
-          onClick={() => document.getElementById("xero-pnl-file-input")?.click()}
-          className={`border-2 border-dashed rounded-xl p-4 flex items-center gap-3 cursor-pointer transition-all ${dragOver ? "border-rose-400 bg-rose-50" : "border-slate-200 hover:border-rose-300 hover:bg-slate-50"}`}
+          onDrop={isAdmin ? onXeroDrop : (e => e.preventDefault())}
+          onClick={() => { if (isAdmin) document.getElementById("xero-pnl-file-input")?.click(); }}
+          aria-disabled={!isAdmin}
+          className={`border-2 border-dashed rounded-xl p-4 flex items-center gap-3 transition-all ${!isAdmin ? "opacity-50 cursor-not-allowed border-slate-200" : `cursor-pointer ${dragOver ? "border-rose-400 bg-rose-50" : "border-slate-200 hover:border-rose-300 hover:bg-slate-50"}`}`}
         >
-          <input id="xero-pnl-file-input" type="file" accept=".xlsx,.xls" className="hidden" onChange={onXeroFileInput}/>
+          <input id="xero-pnl-file-input" type="file" accept=".xlsx,.xls" className="hidden" disabled={!isAdmin} onChange={onXeroFileInput}/>
           {uploading
             ? <Loader2 size={18} className="text-rose-500 animate-spin shrink-0"/>
             : <Upload size={18} className="text-rose-400 shrink-0"/>
@@ -10140,7 +10184,7 @@ const GROUP_COLORS = {Analytics:"bg-blue-600", Planning:"bg-emerald-600", Source
 // showing buttons that look broken.
 const YEAR_AWARE_TABS = new Set(["dashboard", "regions", "expenses", "modeler", "staff", "crm", "data", "staffing"]);
 
-function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, selectedYear, setSelectedYear, availableYears, onReset, supaStatus, currentUser, onLogout}) {
+function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, selectedYear, setSelectedYear, availableYears, onReset, supaStatus, currentUser, isAdmin, onLogout}) {
   const groups = [...new Set(NAV.map(n=>n.group))];
   const activeItem = NAV.find(n=>n.id===activeTab);
   const showYearControls = YEAR_AWARE_TABS.has(activeTab);
@@ -10198,9 +10242,11 @@ function Layout({children, activeTab, onTabChange, yearBasis, setYearBasis, sele
             );
           })()}
           <div className="flex gap-2">
-            <button onClick={onReset} className="flex-1 text-[10px] text-slate-500 hover:text-rose-400 font-medium py-1.5 rounded-lg hover:bg-white/5 transition-colors">
-              Reset Data
-            </button>
+            {isAdmin && (
+              <button onClick={onReset} className="flex-1 text-[10px] text-slate-500 hover:text-rose-400 font-medium py-1.5 rounded-lg hover:bg-white/5 transition-colors">
+                Reset Data
+              </button>
+            )}
             <button onClick={onLogout} className="flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-white font-medium py-1.5 px-3 rounded-lg hover:bg-white/5 transition-colors">
               <LogOut size={11}/>Sign out
             </button>
@@ -10246,6 +10292,7 @@ export default function App() {
   // ── Auth state ──────────────────────────────────────────────────────────────
   const [authState, setAuthState] = useState("checking"); // "checking"|"login"|"change-password"|"app"
   const [currentUser, setCurrentUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false); // gates destructive/org-wide operations; resolved from user_roles
 
   // ── App state ───────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState("dashboard");
@@ -10451,6 +10498,10 @@ export default function App() {
           if(savedXero) { try { setXeroActuals(JSON.parse(savedXero)); } catch {} }
         } catch {}
       }
+      // Resolve the caller's role (admin gates destructive/org-wide operations).
+      // Least privilege: any failure leaves isAdmin = false. Not a security
+      // boundary on its own — RLS enforces the real thing server-side.
+      try { setIsAdmin(await sbGetMyRole(currentUser?.id) === "admin"); } catch { setIsAdmin(false); }
       setLoading(false);
     }
     loadData();
@@ -10484,6 +10535,7 @@ export default function App() {
     await sbAudit(currentUser, "LOGOUT", "AUTH", "Signed out");
     await sbSignOut();
     setCurrentUser(null);
+    setIsAdmin(false);
     setAuthState("login");
     // Clear state
     setUnitAdjustments({});
@@ -10521,6 +10573,7 @@ export default function App() {
   };
 
   const handleUpdateXeroActuals = (payload) => {
+    if (!isAdmin) { alert("Only administrators can change the shared Xero actuals."); return; }
     setXeroActuals(payload);
     const ts = new Date().toISOString();
     if (payload === null) {
@@ -10750,6 +10803,7 @@ export default function App() {
   };
 
     const handleReset = () => {
+    if (!isAdmin) { alert("Only administrators can reset all data."); return; }
     if(confirm("Reset all data? This will clear your adjustments and hiring plan.")) {
       sbAudit(currentUser, "DELETE", "UNIT", "Reset all unit + COA + hiring data");
       setUnitAdjustments({});
@@ -10800,12 +10854,13 @@ export default function App() {
       onReset={handleReset}
       supaStatus={supaStatus}
       currentUser={currentUser}
+      isAdmin={isAdmin}
       onLogout={handleLogout}
     >
       {activeTab==="dashboard" && <DashboardOverview {...props} hiringEvents={hiringEvents} appliedWage={appliedWage} anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onShowAnomalies={()=>setActiveTab("aianalytics")}/>}
       {activeTab==="regions"   && <RegionalAnalysis {...props}/>}
       {activeTab==="cashflow"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><CpiForecastPanel data={data} {...cpiProps}/><CashFlowForecastView data={data}/></div>}
-      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals}/>}
+      {activeTab==="pnl"       && <BudgetActualsPnLView data={data} coaAdjustments={coaAdjustments} xeroActuals={xeroActuals} onUpdateXeroActuals={handleUpdateXeroActuals} isAdmin={isAdmin}/>}
       {activeTab==="expenses"  && <ExpensesView {...props} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear} coaAdjustments={coaAdjustments} onUpdateCoa={handleUpdateCoa} onSaveCoa={handleSaveCoa} saving={saving} filledHires={filledHires} xeroActuals={xeroActuals}/>}
       {activeTab==="modeler"   && <UnitModeler {...props} onUpdateUnits={handleUpdateUnits} onSave={handleSaveAdjustments} saving={saving}/>}
       {activeTab==="staffing"  && <div className="space-y-5"><WageForecastPanel data={data} {...wageProps}/><StaffingView peopleOverrides={peopleOverrides} onUpdatePeople={handleUpdatePeople} onSavePeople={handleSavePeople} saving={saving} hiringEvents={hiringEvents} yearBasis={yearBasis} selectedYear={selectedYear} setYearBasis={setYearBasis} setSelectedYear={setSelectedYear}/></div>}
@@ -10816,7 +10871,7 @@ export default function App() {
       {activeTab==="data"      && <RawDataTable {...props}/>}
       {activeTab==="calc-audit" && <CalcAuditPanel data={data} peopleOverrides={peopleOverrides} hiringEvents={hiringEvents} coaAdjustments={coaAdjustments} currentUser={currentUser}/>}
       {activeTab==="code-audit"  && <CodeAuditAgent/>}
-      {activeTab==="audit"     && <AuditLogView currentUser={currentUser}/>}
+      {activeTab==="audit"     && <AuditLogView currentUser={currentUser} isAdmin={isAdmin}/>}
       {activeTab==="aianalytics" && (
         <div className="space-y-5">
           <AnomalyPanel anomalies={anomalies} anomalyStatus={anomalyStatus} lastScanned={lastScanned} onRescan={runScan} currentUser={currentUser}/>

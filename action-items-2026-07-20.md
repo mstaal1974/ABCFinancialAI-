@@ -9,30 +9,35 @@ Priority key: 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Low
 ## 🔴 Critical (do first)
 
 ### 1. Rotate the exposed Gemini API key
+_Partial 2026-07-20 — code no longer ships any key (see #2); remaining is operator-only: delete leaked keys `…l-8cI`/`…0hOhA` in Google Cloud Console and set a new `GEMINI_API_KEY` in Vercel. Cannot be done from the repo._
 - **Why:** A real `VITE_GEMINI_API_KEY` was committed to git history (initial commit + two changes) and, being `VITE_`-prefixed, was inlined into every deployed browser bundle. It is public and compromised; removing `.env` from tracking does not un-leak it.
 - **What:** Revoke the exposed key in Google AI Studio / Cloud and issue a new one. Store the new key only as the server-side `GEMINI_API_KEY` (never `VITE_`). Optionally scrub history with `git filter-repo`/BFG for hygiene.
 - **Where:** git history (`3dd6f1f`, `20aaa52`, `23b7b5c`); `.env.example`
 - **Refs:** Review #4 (Section 2a)
 
-### 2. Serve Gemini only through the server proxy; delete the client-side key path
+### ~~2. Serve Gemini only through the server proxy; delete the client-side key path~~
+_Done 2026-07-20 — `GEMINI_BASE`/`GEMINI_URL` now always `/api/gemini`; `VITE_GEMINI_API_KEY` removed from `.env.example` (replaced with server-side `GEMINI_API_KEY`); bundle verified clean of key + direct Google call (commit 5c596d4)._
 - **Why:** Even after rotation, the code still ships the key to the browser on any non-prod/preview host via the direct-call branch.
 - **What:** Remove the `GEMINI_BASE`/`GEMINI_URL` direct-call branches; always call `/api/gemini`. Remove `VITE_GEMINI_API_KEY` from `.env.example`. Run the proxy locally for dev.
 - **Where:** `src/App.tsx:4766-4768`, `5673-5675`; `.env.example`
 - **Refs:** Review #4, #16 (Section 2a)
 
 ### 3. Gate destructive/admin operations behind a real role model
+_Partial 2026-07-20 — role model + UI/handler gating for Reset, Restore, and Xero upload/clear implemented (commit f232a7e: `db/roles_and_rls.sql` + `src/App.tsx` `isAdmin`). Remaining: run `db/roles_and_rls.sql` in Supabase and bootstrap the first admin — not enforced until then._
 - **Why:** No authorisation model exists; any authenticated user can "Reset all data", run a whole-org restore, or overwrite shared actuals.
 - **What:** Add a `user_roles`/`profiles` table keyed by `auth.uid()`; check role in RLS `USING`/`WITH CHECK` and in the UI before Reset/Restore/Xero-clear.
 - **Where:** `src/App.tsx:10754-10764` (reset), `4342-4466` (restore), `10529-10543` (xero); DB policies
 - **Refs:** Review #5 (Section 2b)
 
 ### 4. Replace every `using(true)` RLS policy with ownership/tenant scoping
+_Partial 2026-07-20 — policies rewritten in `db/scenarios.sql`, `db/xero_actuals.sql`, and `db/roles_and_rls.sql` (commit f232a7e): shared read, owner-or-admin/admin-only writes, DELETE admin-only. Remaining: run these in Supabase AND drop any pre-existing blanket `using(true)` policies (Postgres OR-combines policies, so leftovers silently keep granting everything)._
 - **Why:** `for all to authenticated using(true) with check(true)` lets every logged-in user read, overwrite, and delete all rows — including other users' financial data and salaries.
 - **What:** Rewrite policies to scope by `auth.uid()`/email or an org model; separate read vs write policies; set owner columns server-side (DB default), never from the client body.
 - **Where:** `db/scenarios.sql:21-27,42-48`; `db/xero_actuals.sql:23-29`
 - **Refs:** Review #1 (Section 2c)
 
 ### 5. Bring all table schemas + RLS into version control and verify RLS is enabled
+_Partial 2026-07-20 — best-effort schemas + RLS for all 8 tables (incl. the 5 previously-unversioned core tables and `audit_log` made append-only) now tracked in `db/roles_and_rls.sql` (commit f232a7e). Remaining: reconcile the inferred column types against production via `supabase db pull`, then run and confirm `enable row level security` on each in Supabase._
 - **Why:** The 5 most sensitive tables (incl. salaries and the audit log) have no schema/policy in the repo — their production authorisation is unauditable and likely the same blanket policy or RLS-off.
 - **What:** Export full schema + RLS for `unit_adjustments`, `coa_adjustments`, `hiring_plan`, `people_overrides`, `audit_log` (and the existing three) into tracked migrations; confirm `alter table … enable row level security` on each; review every policy line-by-line.
 - **Where:** `db/`; tables used at `src/App.tsx:133-177, 4358, 10293-10636`
