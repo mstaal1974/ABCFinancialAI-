@@ -458,7 +458,7 @@ const UNIT_ASSUMPTIONS_FY26 = {
   ACT: {
     MSL20122:    {price: UNIT_RATES.MSL20122.ACT,     monthly: {Jul:0,Aug:0,Sep:0,Oct:0,Nov:0,Dec:0,Jan:0,Feb:0,Mar:0,Apr:0,May:0,Jun:0}},
     MSL30122:    {price: UNIT_RATES.MSL30122.ACT,     monthly: {Jul:0,Aug:4,Sep:0,Oct:4,Nov:0,Dec:4,Jan:0,Feb:2,Mar:0,Apr:0,May:0,Jun:4}},
-    MSL40122:    {price: UNIT_RATES.MSL40122.ACT,     monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:6.6,Mar:0,Apr:6.6,May:0,Jun:6.6}},
+    MSL40122:    {price: UNIT_RATES.MSL40122.ACT,     monthly: {Jul:0,Aug:7,Sep:0,Oct:7,Nov:0,Dec:7,Jan:0,Feb:7,Mar:0,Apr:7,May:0,Jun:7}},
     MSL50122:    {price: UNIT_RATES.MSL50122.ACT,     monthly: {Jul:0,Aug:6.6,Sep:0,Oct:6.6,Nov:0,Dec:6.6,Jan:0,Feb:3.3,Mar:0,Apr:2,May:0,Jun:6}},
     HLT37215:    {price: UNIT_RATES.HLT37215.ACT,     monthly: {Jul:8.8,Aug:10,Sep:10,Oct:17.6,Nov:30,Dec:30,Jan:15,Feb:35,Mar:48,Apr:70,May:90,Jun:120}},
     FFS:         {price: UNIT_RATES.FFS.ACT,          monthly: {Jul:2,Aug:0,Sep:2,Oct:0,Nov:0,Dec:2,Jan:0,Feb:2,Mar:0,Apr:2,May:0,Jun:2}},
