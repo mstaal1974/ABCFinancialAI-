@@ -73,6 +73,7 @@ _Done 2026-07-21 — data model confirmed single-org-shared (documented in `db/r
 - **Refs:** Review #6, #9 (Section 2e, 2g)
 
 ### 10. Make the audit log server-attributed and append-only
+_Partial 2026-07-21 — `audit_log` is append-only with a server-set actor/timestamp (`db/roles_and_rls.sql`), and `db/audit_triggers.sql` adds DB triggers that capture EVERY insert/update/delete on the core tables (incl. direct-API changes that bypass the client) with the JWT actor + server clock. Remaining: run `db/audit_triggers.sql` in Supabase; optionally stop the point-in-time restore from trusting mutable rows (hash-chaining)._
 - **Why:** Audit rows are client-attributed and forgeable/deletable, and the restore feature rewrites financial state by trusting them — a tampered log becomes a corruption vector, and the trail is not defensible.
 - **What:** RLS INSERT-only on `audit_log`; set actor from `auth.uid()` and `created_at` from `default now()`; ignore client `id`/`user_email`/timestamps; consider hash-chaining; stop reconstructing financial state from mutable rows.
 - **Where:** `src/App.tsx:163-177`, `4358-4404`
