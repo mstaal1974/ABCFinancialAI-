@@ -44,6 +44,7 @@ _Partial 2026-07-20 — best-effort schemas + RLS for all 8 tables (incl. the 5 
 - **Refs:** Review #2 (Section 2c)
 
 ### 6. Add per-user/tenant scoping to data reads and resolve the localStorage/DB race
+_Done 2026-07-21 — data model confirmed single-org-shared (documented in `db/roles_and_rls.sql` and the load code), so `sbGet` stays intentionally unscoped. The localStorage/DB race is resolved: when Supabase is reachable the shared DB is authoritative and the browser cache is healed to match (unit_adjustments + xero_actuals load blocks in `src/App.tsx`), including clearing xero to baseline when no shared row exists; stale caches with no confirmed-sync marker can no longer re-assert or re-push old numbers. localStorage is now only a read-only offline fallback + provably-unsynced-edit recovery. Lesser edge left as-is: coa/people/hiring/wage/cpi still fall back to localStorage only when the DB is empty (they never push stale data back, so they cannot corrupt the shared dataset)._
 - **Why:** `sbGet` fetches `select=*` with no scope, making all financial data one shared pool — the direct cause of the reported "different logins see different numbers" symptom, compounded by per-browser caches racing the shared `xero_actuals` row.
 - **What:** Decide and document the data model (single-org-shared vs per-user). If per-user, filter every read/write by owner in both RLS and queries. Either way, make the shared DB row the single source of truth and stop layering stale `localStorage` over it.
 - **Where:** `src/App.tsx:133-160`, `10294-10298`

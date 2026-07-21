@@ -10335,43 +10335,62 @@ export default function App() {
     if (authState !== "app") return;
     async function loadData() {
       try {
+        // DATA MODEL: single-organisation, shared data. Every authenticated user
+        // sees the same company financials (see db/roles_and_rls.sql), so sbGet is
+        // intentionally unscoped. SINGLE SOURCE OF TRUTH: whenever Supabase is
+        // reachable, the shared DB is authoritative and we HEAL this browser's
+        // localStorage cache to match it — a stale per-browser cache can therefore
+        // never re-assert old numbers over the shared data (that layering was the
+        // "different logins, different numbers" bug). localStorage is only used to
+        //   (a) show the last-known state read-only when the DB is unreachable, and
+        //   (b) recover a *provably* unsynced edit made in THIS browser after its
+        //       last confirmed sync — which is then pushed back up so the DB stays
+        //       the source of truth. Markers: unit_model_adjustments_ts (last local
+        //       edit) vs unit_model_synced_ts (last edit confirmed saved to the DB).
         const adjData = await sbGet("unit_adjustments");
-        // Reconcile Supabase vs localStorage and prefer whichever is newer, instead of
-        // always letting the DB shadow local edits. localStorage carries two markers:
-        //   unit_model_adjustments_ts → time of the last local edit
-        //   unit_model_synced_ts      → time of the last edit confirmed saved to the DB
-        // If there are local edits made *after* the last confirmed sync, they are
-        // at-risk unsaved changes — recover them and push them back up to Supabase.
+        const dbReachable = Array.isArray(adjData); // sbGet → null on error/unreachable
         const sbMap = {};
-        if (adjData && Array.isArray(adjData)) adjData.forEach(row => { if(row.key && row.value!==null) sbMap[row.key] = row.value; });
+        if (dbReachable) adjData.forEach(row => { if(row.key && row.value!==null) sbMap[row.key] = row.value; });
         let lsMap = null;
         try { const raw = localStorage.getItem("unit_model_adjustments"); lsMap = raw ? JSON.parse(raw) : null; } catch { /* ignore malformed cache */ }
         const lsTs = localStorage.getItem("unit_model_adjustments_ts");
         const syncedTs = localStorage.getItem("unit_model_synced_ts");
-        const hasUnsyncedLocal = lsMap && Object.keys(lsMap).length > 0 && lsTs && (!syncedTs || lsTs > syncedTs);
+        // Require a prior confirmed sync to compare against: with no synced marker we
+        // cannot prove local is newer, so the DB wins (this is what stops orphaned
+        // pre-fix caches from clobbering the shared data on every login).
+        const hasUnsyncedLocal = dbReachable && lsMap && Object.keys(lsMap).length > 0 && lsTs && syncedTs && lsTs > syncedTs;
+        // Overwrite the local cache to match the given map and mark it fully synced,
+        // so a later load can't treat it as "unsynced" and re-assert stale numbers.
+        const healUnitCache = (map) => {
+          const now = new Date().toISOString();
+          try {
+            localStorage.setItem("unit_model_adjustments", JSON.stringify(map));
+            localStorage.setItem("unit_model_adjustments_ts", now);
+            localStorage.setItem("unit_model_synced_ts", now);
+          } catch { /* storage unavailable */ }
+        };
 
         if (hasUnsyncedLocal) {
-          // Local edits are newer than the last confirmed DB sync — they win.
+          // At-risk local edit made after the last confirmed sync — write it through
+          // to the shared DB, then adopt it. If the push fails, fall back to the DB.
           const merged = { ...sbMap, ...lsMap };
-          setUnitAdjustments(merged);
-          console.warn("⚠ Unit adjustments: found local edits newer than the last DB sync — recovering them and re-syncing to Supabase.");
           const rows = Object.entries(merged).map(([key, value]) => ({ key, value }));
-          if (rows.length > 0) {
-            const ok = await sbUpsert("unit_adjustments", rows);
-            const now = new Date().toISOString();
-            localStorage.setItem("unit_model_adjustments", JSON.stringify(merged));
-            localStorage.setItem("unit_model_adjustments_ts", now);
-            if (ok) localStorage.setItem("unit_model_synced_ts", now);
+          const ok = rows.length > 0 ? await sbUpsert("unit_adjustments", rows) : true;
+          if (ok) {
+            setUnitAdjustments(merged); healUnitCache(merged);
+            console.warn("⚠ Unit adjustments: recovered an unsynced local edit and re-synced it to Supabase.");
+          } else {
+            setUnitAdjustments(sbMap); healUnitCache(sbMap);
+            console.warn("Unit adjustments: local re-sync failed — using Supabase as the source of truth.");
           }
-        } else if (Object.keys(sbMap).length > 0) {
-          // No newer local edits — trust the DB. (Do not overwrite localStorage here,
-          // so any orphaned pre-fix edits remain recoverable by inspection.)
-          setUnitAdjustments(sbMap);
-          console.log(`✓ Loaded ${Object.keys(sbMap).length} unit adjustments from Supabase`);
+        } else if (dbReachable) {
+          // DB is authoritative — adopt it and heal the cache to match (even if empty).
+          setUnitAdjustments(sbMap); healUnitCache(sbMap);
+          console.log(`✓ Unit adjustments: ${Object.keys(sbMap).length} from Supabase (authoritative)`);
         } else if (lsMap && Object.keys(lsMap).length > 0) {
-          // DB empty/missing — fall back to localStorage.
+          // DB unreachable — show the local cache read-only (offline); do NOT push.
           setUnitAdjustments(lsMap);
-          console.log("✓ Unit adjustments loaded from localStorage fallback");
+          console.warn("Unit adjustments: Supabase unreachable — using local cache (offline).");
         }
 
         const hireData = await sbGet("hiring_plan");
@@ -10440,15 +10459,17 @@ export default function App() {
           const savedCpi = localStorage.getItem("applied_cpi_settings");
           if (savedCpi) { try { const c = JSON.parse(savedCpi); setAppliedCpi(c); setDraftCpi(c); } catch {} }
         }
-        // Load uploaded Xero P&L actuals. Supabase is the shared source of truth
-        // (one org-wide `xero_actuals` row) so every login sees the same numbers.
-        // Reconciled against localStorage exactly like unit adjustments: a machine
-        // that uploaded while offline / before the DB round-tripped isn't lost —
-        // its unsynced upload is recovered and pushed back up. If the table is
-        // absent (sbGet → null), we degrade to the localStorage-only behaviour.
+        // Load uploaded Xero P&L actuals — one org-wide `xero_actuals` row that is
+        // the SINGLE SOURCE OF TRUTH. Same policy as unit adjustments: when Supabase
+        // is reachable the shared row is authoritative and we heal this browser's
+        // cache to match it — INCLUDING clearing to baseline when there is no shared
+        // row, so a stale local upload can never linger over the shared state (uploads
+        // are admin-only and go straight to the DB). localStorage is only the
+        // read-only offline fallback plus a provably-unsynced-upload recovery.
         try {
           const xeroRows = await sbGet("xero_actuals");
-          const sbXeroRow = Array.isArray(xeroRows) ? xeroRows.find(r => r.id === "shared") : null;
+          const xDbReachable = Array.isArray(xeroRows); // sbGet → null if table absent/unreachable
+          const sbXeroRow = xDbReachable ? xeroRows.find(r => r.id === "shared") : null;
           let sbXeroPayload = null;
           if (sbXeroRow?.data) { try { sbXeroPayload = JSON.parse(sbXeroRow.data); } catch {} }
 
@@ -10456,21 +10477,37 @@ export default function App() {
           try { const raw = localStorage.getItem("xero_actuals"); lsXero = raw ? JSON.parse(raw) : null; } catch { /* ignore malformed cache */ }
           const xLsTs = localStorage.getItem("xero_actuals_ts");
           const xSyncedTs = localStorage.getItem("xero_actuals_synced_ts");
-          const xHasUnsyncedLocal = lsXero && xLsTs && (!xSyncedTs || xLsTs > xSyncedTs);
+          const xHasUnsyncedLocal = xDbReachable && lsXero && xLsTs && xSyncedTs && xLsTs > xSyncedTs;
+          const healXeroCache = (payload) => {
+            const now = new Date().toISOString();
+            try {
+              if (payload) localStorage.setItem("xero_actuals", JSON.stringify(payload));
+              else localStorage.removeItem("xero_actuals");
+              localStorage.setItem("xero_actuals_ts", now);
+              localStorage.setItem("xero_actuals_synced_ts", now);
+            } catch { /* storage unavailable */ }
+          };
 
           if (xHasUnsyncedLocal) {
-            setXeroActuals(lsXero);
-            console.warn("⚠ Xero actuals: local upload newer than the last DB sync — recovering it and re-syncing to Supabase.");
+            // Provably-unsynced local upload — write it through, then adopt it. On a
+            // failed push (e.g. a non-admin can't write) fall back to the DB state.
             const now = new Date().toISOString();
             const ok = await sbUpsert("xero_actuals", [{ id: "shared", data: JSON.stringify(lsXero), user_email: currentUser?.email || "unknown", updated_at: now }]);
-            if (ok) localStorage.setItem("xero_actuals_synced_ts", now);
-          } else if (sbXeroPayload) {
-            setXeroActuals(sbXeroPayload);
-            localStorage.setItem("xero_actuals", JSON.stringify(sbXeroPayload));
-            console.log("✓ Loaded Xero P&L actuals from Supabase (shared)");
+            if (ok) {
+              setXeroActuals(lsXero); healXeroCache(lsXero);
+              console.warn("⚠ Xero actuals: recovered an unsynced local upload and re-synced it to Supabase.");
+            } else {
+              setXeroActuals(sbXeroPayload); healXeroCache(sbXeroPayload);
+              console.warn("Xero actuals: local re-sync failed — using Supabase as the source of truth.");
+            }
+          } else if (xDbReachable) {
+            // DB authoritative: adopt the shared row, or clear to baseline if none.
+            setXeroActuals(sbXeroPayload); healXeroCache(sbXeroPayload);
+            console.log(sbXeroPayload ? "✓ Xero actuals from Supabase (authoritative)" : "✓ Xero actuals: none in Supabase — baseline (authoritative)");
           } else if (lsXero) {
+            // DB unreachable — show local cache read-only (offline); do NOT push.
             setXeroActuals(lsXero);
-            console.log("✓ Xero P&L actuals loaded from localStorage fallback");
+            console.warn("Xero actuals: Supabase unreachable — using local cache (offline).");
           }
         } catch (xe) {
           console.warn("Xero actuals load failed, using localStorage fallback:", xe);
